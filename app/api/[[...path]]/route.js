@@ -19,10 +19,20 @@ async function connectToMongo() {
   if (!db) {
     if (!connecting) {
       connecting = (async () => {
-        const c = new MongoClient(process.env.MONGO_URL)
+        const mongoUrl = process.env.MONGO_URL
+        const dbName = process.env.DB_NAME
+        
+        if (!mongoUrl) {
+          throw new Error('MONGO_URL environment variable is not defined. Please set it in your .env.local file. Example: MONGO_URL=mongodb://localhost:27017')
+        }
+        if (!dbName) {
+          throw new Error('DB_NAME environment variable is not defined. Please set it in your .env.local file. Example: DB_NAME=across_db')
+        }
+        
+        const c = new MongoClient(mongoUrl)
         await c.connect()
         client = c
-        db = c.db(process.env.DB_NAME)
+        db = c.db(dbName)
         return db
       })()
     }
@@ -581,7 +591,7 @@ async function handleRoute(request, { params }) {
       if (replaceId) {
         const old = await db.collection('documents').findOne({ id: replaceId })
         if (old) {
-          try { fs.unlinkSync(path.join(UPLOAD_DIR, old.storedName)) } catch (e) {}
+          try { fs.unlinkSync(path.join(UPLOAD_DIR, old.storedName)) } catch (e) { }
           await db.collection('documents').deleteOne({ id: replaceId })
           doc.id = replaceId
         }
@@ -604,7 +614,7 @@ async function handleRoute(request, { params }) {
         if (user.role === 'management') return error('Management bersifat read-only', 403)
         const doc = await db.collection('documents').findOne({ id: segments[1] })
         if (!doc) return error('Not found', 404)
-        try { fs.unlinkSync(path.join(UPLOAD_DIR, doc.storedName)) } catch (e) {}
+        try { fs.unlinkSync(path.join(UPLOAD_DIR, doc.storedName)) } catch (e) { }
         await db.collection('documents').deleteOne({ id: segments[1] })
         if (doc.projectId) await recomputeProject(db, doc.projectId)
         return json({ ok: true })
@@ -972,7 +982,7 @@ async function handleRoute(request, { params }) {
         if (!existing) return error('Not found', 404)
         await col.deleteOne({ id })
         const docs = await db.collection('documents').find({ entityId: id }).toArray()
-        for (const d of docs) { try { fs.unlinkSync(path.join(UPLOAD_DIR, d.storedName)) } catch (e) {} }
+        for (const d of docs) { try { fs.unlinkSync(path.join(UPLOAD_DIR, d.storedName)) } catch (e) { } }
         await db.collection('documents').deleteMany({ entityId: id })
         if (existing.projectId) await recomputeProject(db, existing.projectId)
         return json({ ok: true })

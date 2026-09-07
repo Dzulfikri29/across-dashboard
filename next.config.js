@@ -1,5 +1,6 @@
 const nextConfig = {
   output: 'standalone',
+  turbopack: {},
   images: {
     unoptimized: true,
     remotePatterns: [
