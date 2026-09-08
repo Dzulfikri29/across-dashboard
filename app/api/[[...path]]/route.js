@@ -67,7 +67,7 @@ const COLLECTIONS = {
   users: 'users',
 }
 
-const STAGE_ORDER = ['Approach', 'Penawaran', 'PO', 'Schedule', 'BAST', 'Invoice In', 'Invoice Out', 'Closed']
+const STAGE_ORDER = ['Approach', 'Penawaran', 'PO Masuk', 'Schedule', 'BAST', 'Invoice In', 'Invoice Out', 'Closed']
 
 const WRITE_PERMISSIONS = {
   admin: Object.keys(COLLECTIONS),
@@ -79,10 +79,10 @@ const WRITE_PERMISSIONS = {
 
 const DEFAULT_SETTINGS = {
   id: 'global',
-  revenueBasis: 'invoice_out', // invoice_out | po_value | completed_project
+  revenueBasis: 'po_value', // po_value (PO Masuk final value)
   businessLines: ['Trading', 'Logistics'],
   units: ['MT', 'kg', 'liter', 'unit', 'trip', 'container', 'CBM', 'other'],
-  documentCategories: ['Quotation', 'PO', 'Surat Jalan', 'POD', 'BAST', 'Invoice', 'Foto', 'Lainnya'],
+  documentCategories: ['Quotation', 'PO Masuk', 'Surat Jalan', 'POD', 'BAST', 'Invoice', 'Foto', 'Lainnya'],
   projectStatuses: ['Belum Jalan', 'Ongoing', 'Partial', 'Finish', 'Cancelled'],
   notificationRules: {
     quotationNoAttachment: true,
@@ -123,6 +123,28 @@ const addDays = (days, base = new Date()) => {
   return d.toISOString().slice(0, 10)
 }
 const monthKey = (iso) => (iso ? String(iso).slice(0, 7) : null)
+
+const ACTUAL_DATE_KEYS = new Set([
+  'approachDate',
+  'lastFollowUp',
+  'quotationDate',
+  'poDate',
+  'actualDate',
+  'bastDate',
+  'invoiceDate',
+  'paymentDate',
+  'lastUpdated',
+])
+
+function validateActualDates(body) {
+  const today = todayISO()
+  for (const key of ACTUAL_DATE_KEYS) {
+    if (body[key] && String(body[key]).slice(0, 10) > today) {
+      return 'Tanggal tidak boleh melebihi hari ini.'
+    }
+  }
+  return null
+}
 
 function hashPassword(password, salt = crypto.randomBytes(8).toString('hex')) {
   const hash = crypto.scryptSync(password, salt, 32).toString('hex')
@@ -189,6 +211,12 @@ function normalizeRecord(key, body) {
   }
   if (key === 'pos') {
     rec.poValue = num(rec.poValue)
+    rec.hppFinal = num(rec.hppFinal !== undefined ? rec.hppFinal : rec.hpp)
+    rec.hpp = rec.hppFinal
+    rec.marginFinal = rec.poValue - rec.hppFinal
+    rec.marginFinalPct = rec.poValue > 0 ? Math.round((rec.marginFinal / rec.poValue) * 10000) / 100 : 0
+    rec.margin = rec.marginFinal
+    rec.marginPct = rec.marginFinalPct
     rec.quantity = num(rec.quantity)
   }
   if (key === 'schedules' || key === 'basts') {
@@ -234,19 +262,32 @@ async function recomputeProject(db, projectId) {
     db.collection('approaches').find({ projectId }).toArray(),
   ])
 
-  const approved = quotations.find((q) => q.status === 'Approved')
-  const latestQ = approved || quotations.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))[0]
+  // RECOGNIZED COMMERCIAL VALUES COME ONLY FROM VALID PO MASUK (Confirmed, Running, Completed)
+  const validPos = pos.filter((p) => ['Confirmed', 'Running', 'Completed'].includes(p.status))
   const activePos = pos.filter((p) => p.status !== 'Cancelled')
 
-  let revenue = latestQ ? num(latestQ.revenue) : 0
-  let hpp = latestQ ? num(latestQ.hpp) : 0
-  if (!latestQ && activePos.length) revenue = activePos.reduce((s, p) => s + num(p.poValue), 0)
+  const recognizedRevenue = validPos.reduce((s, p) => s + num(p.poValue), 0)
+  const recognizedHpp = validPos.reduce((s, p) => s + num(p.hppFinal !== undefined ? p.hppFinal : p.hpp), 0)
+  const recognizedMargin = recognizedRevenue - recognizedHpp
+  const recognizedMarginPct = recognizedRevenue > 0 ? Math.round((recognizedMargin / recognizedRevenue) * 10000) / 100 : 0
+
+  let revenue = recognizedRevenue
+  let hpp = recognizedHpp
   if (project.manualRevenue) revenue = num(project.revenue)
   if (project.manualRevenue) hpp = num(project.hpp)
 
+  // PROJECTED VALUES COME FROM ACTIVE PENAWARAN (Quotations)
+  const activeQuotations = quotations.filter((q) => q.status !== 'Lost')
+  const approvedQ = quotations.find((q) => q.status === 'Approved')
+  const primaryQ = approvedQ || activeQuotations[0] || quotations[0]
+  const projectedRevenue = primaryQ ? num(primaryQ.revenue) : 0
+  const projectedHpp = primaryQ ? num(primaryQ.hpp) : 0
+  const projectedMargin = projectedRevenue - projectedHpp
+  const projectedMarginPct = projectedRevenue > 0 ? Math.round((projectedMargin / projectedRevenue) * 10000) / 100 : 0
+
   const poQty = activePos.reduce((s, p) => s + num(p.quantity), 0)
-  const poValue = activePos.reduce((s, p) => s + num(p.poValue), 0)
-  const unit = activePos[0]?.unit || latestQ?.unit || project.unit || ''
+  const poValue = recognizedRevenue
+  const unit = activePos[0]?.unit || primaryQ?.unit || project.unit || ''
   const deliveredQty = schedules.filter((s) => s.status === 'Delivered').reduce((s, r) => s + num(r.qty), 0)
   const scheduledQty = schedules.filter((s) => s.status !== 'Cancelled').reduce((s, r) => s + num(r.qty), 0)
   const bastQty = basts.reduce((s, b) => s + num(b.qty), 0)
@@ -282,6 +323,10 @@ async function recomputeProject(db, projectId) {
     hpp,
     margin,
     marginPct: revenue > 0 ? Math.round((margin / revenue) * 10000) / 100 : 0,
+    projectedRevenue,
+    projectedHpp,
+    projectedMargin,
+    projectedMarginPct,
     poQty,
     poValue,
     unit,
@@ -425,43 +470,46 @@ async function computeKpis(db, settings, filters = {}) {
   const projectIds = projects.map((p) => p.id)
   const range = periodRange(filters.period)
   const scoped = { projectId: { $in: projectIds } }
-  const [invOut, invIn, pos, stocks] = await Promise.all([
+  const [invOut, invIn, pos, stocks, quotations] = await Promise.all([
     db.collection('invoices_out').find(scoped).toArray(),
     db.collection('invoices_in').find(scoped).toArray(),
-    db.collection('pos').find({ ...scoped, status: { $ne: 'Cancelled' } }).toArray(),
+    db.collection('pos').find({ ...scoped, status: { $in: ['Confirmed', 'Running', 'Completed'] } }).toArray(),
     db.collection('stocks').find(projectIds.length ? { $or: [scoped, { projectId: { $in: [null, ''] } }] } : {}).toArray(),
+    db.collection('quotations').find({ ...scoped, status: { $ne: 'Lost' } }).toArray(),
   ])
   const invOutP = invOut.filter((i) => inRange(i.invoiceDate, range))
   const posP = pos.filter((p) => inRange(p.poDate, range))
-  const projectsP = projects.filter((p) => inRange((p.createdAt || '').slice(0, 10), range))
+  const quotationsP = quotations.filter((q) => inRange((q.quotationDate || q.createdAt || '').slice(0, 10), range))
 
-  let omzet = 0
-  if (settings.revenueBasis === 'po_value') omzet = posP.reduce((s, p) => s + num(p.poValue), 0)
-  else if (settings.revenueBasis === 'completed_project') omzet = projectsP.filter((p) => p.status === 'Finish').reduce((s, p) => s + num(p.revenue), 0)
-  else omzet = invOutP.reduce((s, i) => s + num(i.amount), 0)
+  // Recognized Omzet, HPP, and Margin strictly from valid PO Masuk
+  const omzet = posP.reduce((s, p) => s + num(p.poValue), 0)
+  const hpp = posP.reduce((s, p) => s + num(p.hppFinal !== undefined ? p.hppFinal : p.hpp), 0)
+  const margin = omzet - hpp
+  const marginPct = omzet > 0 ? Math.round((margin / omzet) * 1000) / 10 : 0
+  const potentialPipeline = quotationsP.reduce((s, q) => s + num(q.revenue), 0)
 
-  const revenueBase = projectsP.filter((p) => p.status !== 'Cancelled')
-  const totalRevenue = revenueBase.reduce((s, p) => s + num(p.revenue), 0)
-  const margin = revenueBase.reduce((s, p) => s + (num(p.revenue) - num(p.hpp)), 0)
   const piutang = invOut.reduce((s, i) => s + num(i.outstanding), 0)
   const utang = invIn.reduce((s, i) => s + num(i.outstanding), 0)
   const stok = stocks.reduce((s, i) => s + num(i.stockValue), 0)
 
   return {
     omzet,
+    hpp,
     margin,
-    marginPct: totalRevenue > 0 ? Math.round((margin / totalRevenue) * 1000) / 10 : 0,
-    totalRevenue,
+    marginPct,
+    potentialPipeline,
+    totalRevenue: omzet,
     piutang,
     utang,
     stok,
     activeProjects: projects.filter((p) => ['Ongoing', 'Partial'].includes(p.status)).length,
     finishedProjects: projects.filter((p) => p.status === 'Finish').length,
-    revenueBasis: settings.revenueBasis,
+    revenueBasis: 'po_value',
     projects,
     invOut,
     invIn,
     pos,
+    validPos: posP,
     range,
   }
 }
@@ -647,7 +695,7 @@ async function handleRoute(request, { params }) {
       const results = [
         ...projects.map((p) => ({ type: 'Project', title: `${p.projectId} · ${p.customer}`, subtitle: p.projectName, href: `/projects/${p.id}` })),
         ...quotations.map((x) => ({ type: 'Penawaran', title: x.quotationNumber, subtitle: x.customer, href: `/penawaran?q=${encodeURIComponent(x.quotationNumber)}` })),
-        ...pos.map((x) => ({ type: 'PO', title: x.poNumber, subtitle: x.customer, href: `/po?q=${encodeURIComponent(x.poNumber)}` })),
+        ...pos.map((x) => ({ type: 'PO Masuk', title: x.poNumber, subtitle: x.customer, href: `/po?q=${encodeURIComponent(x.poNumber)}` })),
         ...basts.map((x) => ({ type: 'BAST', title: x.bastNumber, subtitle: '', href: `/bast?q=${encodeURIComponent(x.bastNumber)}` })),
         ...invIn.map((x) => ({ type: 'Invoice In', title: x.invoiceNumber, subtitle: x.vendor, href: `/invoice-in?q=${encodeURIComponent(x.invoiceNumber)}` })),
         ...invOut.map((x) => ({ type: 'Invoice Out', title: x.invoiceNumber, subtitle: x.customer, href: `/invoice-out?q=${encodeURIComponent(x.invoiceNumber)}` })),
@@ -675,10 +723,11 @@ async function handleRoute(request, { params }) {
         computeAlerts(db, settings),
         db.collection('projects').distinct('salesPic'),
       ])
+      const validPos = pos.filter((p) => ['Confirmed', 'Running', 'Completed'].includes(p.status))
       const pipeline = [
         { key: 'approach', label: 'Approach', count: approaches, href: '/approach' },
         { key: 'penawaran', label: 'Penawaran', count: quotations.length, value: quotations.reduce((s, x) => s + num(x.revenue), 0), href: '/penawaran' },
-        { key: 'po', label: 'PO', count: pos.length, value: pos.reduce((s, x) => s + num(x.poValue), 0), href: '/po' },
+        { key: 'po', label: 'PO Masuk', count: validPos.length, value: validPos.reduce((s, x) => s + num(x.poValue), 0), href: '/po' },
         { key: 'schedule', label: 'Schedule', count: schedules, href: '/schedule' },
         { key: 'bast', label: 'BAST', count: basts, href: '/bast' },
         { key: 'invoice-in', label: 'Invoice In', count: invIn.length, value: invIn.reduce((s, x) => s + num(x.amount), 0), href: '/invoice-in' },
@@ -692,7 +741,7 @@ async function handleRoute(request, { params }) {
     if (route === '/summary' && method === 'GET') {
       const settings = await getSettings(db)
       const kpi = await computeKpis(db, settings, q)
-      const { projects, invOut, invIn, pos, range, ...kpis } = kpi
+      const { projects, invOut, invIn, pos, validPos, range, ...kpis } = kpi
       const projMap = Object.fromEntries(projects.map((p) => [p.id, p]))
 
       // months (last 6 or range)
@@ -706,17 +755,24 @@ async function handleRoute(request, { params }) {
         const [y, m] = mk.split('-')
         return new Date(Number(y), Number(m) - 1, 1).toLocaleDateString('id-ID', { month: 'short', year: '2-digit' })
       }
+
+      // Monthly Omzet and Margin strictly from valid PO Masuk
+      const allValidPos = await db.collection('pos').find({
+        status: { $in: ['Confirmed', 'Running', 'Completed'] },
+        projectId: { $in: projects.map((p) => p.id) },
+      }).toArray()
+
       const byMonth = months.map((mk) => {
-        const invs = invOut.filter((i) => monthKey(i.invoiceDate) === mk)
-        const omzet = invs.reduce((s, i) => s + num(i.amount), 0)
-        const margin = invs.reduce((s, i) => s + num(i.amount) * (num(projMap[i.projectId]?.marginPct) / 100), 0)
-        const trading = invs.filter((i) => projMap[i.projectId]?.businessLine === 'Trading').reduce((s, i) => s + num(i.amount), 0)
-        const logistics = invs.filter((i) => projMap[i.projectId]?.businessLine === 'Logistics').reduce((s, i) => s + num(i.amount), 0)
+        const monthPos = allValidPos.filter((p) => monthKey(p.poDate) === mk)
+        const omzet = monthPos.reduce((s, p) => s + num(p.poValue), 0)
+        const margin = monthPos.reduce((s, p) => s + (num(p.poValue) - num(p.hppFinal !== undefined ? p.hppFinal : p.hpp)), 0)
+        const trading = monthPos.filter((p) => (p.businessLine || projMap[p.projectId]?.businessLine) === 'Trading').reduce((s, p) => s + num(p.poValue), 0)
+        const logistics = monthPos.filter((p) => (p.businessLine || projMap[p.projectId]?.businessLine) === 'Logistics').reduce((s, p) => s + num(p.poValue), 0)
         return { month: label(mk), key: mk, omzet, margin: Math.round(margin), trading, logistics }
       })
       const contribution = ['Trading', 'Logistics'].map((bl) => ({
         name: bl,
-        value: invOut.filter((i) => projMap[i.projectId]?.businessLine === bl).reduce((s, i) => s + num(i.amount), 0),
+        value: allValidPos.filter((p) => (p.businessLine || projMap[p.projectId]?.businessLine) === bl).reduce((s, p) => s + num(p.poValue), 0),
         projects: projects.filter((p) => p.businessLine === bl).length,
       }))
       const stageCounts = STAGE_ORDER.map((stage) => ({ name: stage, value: projects.filter((p) => p.currentStage === stage).length }))
@@ -810,13 +866,27 @@ async function handleRoute(request, { params }) {
       const qt = await db.collection('quotations').findOne({ id: segments[1] })
       if (!qt) return error('Quotation not found', 404)
       if (qt.status !== 'Approved') await db.collection('quotations').updateOne({ id: qt.id }, { $set: { status: 'Approved' } })
+      const project = await db.collection('projects').findOne({ id: qt.projectId })
+      const rev = num(qt.revenue)
+      const hpp = num(qt.hpp)
       return json({
         prefill: {
           projectId: qt.projectId,
-          customer: qt.customer,
-          poValue: qt.revenue,
           quotationId: qt.id,
           quotationNumber: qt.quotationNumber,
+          quotationDate: qt.quotationDate || '',
+          customer: qt.customer,
+          projectName: qt.projectName || project?.projectName || '',
+          businessLine: qt.businessLine || project?.businessLine || '',
+          salesPic: qt.salesPic || project?.salesPic || '',
+          nilaiPenawaran: rev,
+          estimatedHpp: hpp,
+          estimatedMargin: rev - hpp,
+          estimatedMarginPct: rev > 0 ? ((rev - hpp) / rev) * 100 : 0,
+          poValue: rev,
+          hppFinal: hpp,
+          marginFinal: rev - hpp,
+          marginFinalPct: rev > 0 ? ((rev - hpp) / rev) * 100 : 0,
           unit: qt.unit || '',
         },
       })
@@ -908,7 +978,10 @@ async function handleRoute(request, { params }) {
 
       if (method === 'POST' && !id) {
         if (!canWrite(user, key)) return error('Role Anda tidak punya akses menulis di sini', 403)
-        const body = normalizeRecord(key, await request.json())
+        const rawJson = await request.json()
+        const dateErr = validateActualDates(rawJson)
+        if (dateErr) return error(dateErr, 400)
+        const body = normalizeRecord(key, rawJson)
         const now = new Date().toISOString()
         if (key === 'users') {
           if (!body.email || !body.password) return error('Email & password wajib')
@@ -938,6 +1011,33 @@ async function handleRoute(request, { params }) {
           body.projectId = p.id
         }
         delete body.createProject
+
+        // Connected parent-child validation
+        if (key === 'pos') {
+          if (!body.quotationId) {
+            const q = await db.collection('quotations').findOne({ projectId: body.projectId, status: 'Approved' })
+            if (q) {
+              body.quotationId = q.id
+              body.quotationNumber = q.quotationNumber
+            } else {
+              return error('PO Masuk harus berasal dari Penawaran yang disetujui', 400)
+            }
+          }
+        }
+        if (key === 'schedules') {
+          if (!body.poId) return error('PO Masuk wajib dipilih untuk Schedule', 400)
+        }
+        if (key === 'basts') {
+          if (!body.poId || !body.deliveryRef) return error('PO Masuk dan Schedule (Delivery Ref) wajib dipilih untuk BAST', 400)
+        }
+        if (key === 'invoices-in' || key === 'invoices-out') {
+          if (!body.poId) return error('PO Masuk wajib dipilih untuk Invoice', 400)
+        }
+        if (body.poId && !body.poNumber) {
+          const po = await db.collection('pos').findOne({ id: body.poId })
+          if (po) body.poNumber = po.poNumber
+        }
+
         const record = { id: uuidv4(), ...body, createdAt: now, updatedAt: now, createdBy: user.name }
         await col.insertOne(record)
         if (record.projectId) await recomputeProject(db, record.projectId)
@@ -950,6 +1050,8 @@ async function handleRoute(request, { params }) {
         const existing = await col.findOne({ id })
         if (!existing) return error('Not found', 404)
         const patch = await request.json()
+        const dateErr = validateActualDates(patch)
+        if (dateErr) return error(dateErr, 400)
         delete patch.id
         delete patch._id
         delete patch.createdAt
@@ -964,6 +1066,10 @@ async function handleRoute(request, { params }) {
         if (key === 'projects') {
           if (patch.revenue !== undefined || patch.hpp !== undefined) merged.manualRevenue = true
           if (patch.status !== undefined) merged.statusOverride = patch.status || null
+        }
+        if (merged.poId && !merged.poNumber) {
+          const po = await db.collection('pos').findOne({ id: merged.poId })
+          if (po) merged.poNumber = po.poNumber
         }
         merged.updatedAt = new Date().toISOString()
         merged.updatedBy = user.name
@@ -1155,8 +1261,34 @@ async function seedDatabase(db, reset = false) {
   ]
   const pos = PO.map(([n, no, val, qty, unit, vendor, status, d]) => {
     const p = pr(n)
-    const rec = { id: uuidv4(), projectId: p.id, customer: p.customer, poNumber: no, poDate: D(d), poValue: val, quantity: qty, unit, vendor, status, notes: '', createdAt: new Date(Date.now() + d * 86400000).toISOString(), updatedAt: now, createdBy: p.salesPic }
-    addDoc('pos', rec.id, p.id, `PO-${no}.pdf`, 'PO', p.salesPic, -d)
+    const matchingQ = quotations.find((q) => q.projectId === p.id && q.status === 'Approved') || quotations.find((q) => q.projectId === p.id)
+    const hppFinal = matchingQ ? Math.round(matchingQ.hpp * (val / (matchingQ.revenue || val))) : Math.round(val * 0.85)
+    const marginFinal = val - hppFinal
+    const marginFinalPct = val > 0 ? Math.round((marginFinal / val) * 10000) / 100 : 0
+    const rec = {
+      id: uuidv4(),
+      projectId: p.id,
+      quotationId: matchingQ?.id || null,
+      quotationNumber: matchingQ?.quotationNumber || '',
+      customer: p.customer,
+      salesPic: p.salesPic,
+      businessLine: p.businessLine,
+      poNumber: no,
+      poDate: D(d),
+      poValue: val,
+      hppFinal,
+      marginFinal,
+      marginFinalPct,
+      quantity: qty,
+      unit,
+      vendor,
+      status,
+      notes: '',
+      createdAt: new Date(Date.now() + d * 86400000).toISOString(),
+      updatedAt: now,
+      createdBy: p.salesPic,
+    }
+    addDoc('pos', rec.id, p.id, `PO-${no}.pdf`, 'PO Masuk', p.salesPic, -d)
     return rec
   })
   await db.collection('pos').insertMany(pos)
@@ -1214,7 +1346,8 @@ async function seedDatabase(db, reset = false) {
   ]
   const invIn = II.map(([n, vendor, no, d, due, amount, paid, status]) => {
     const p = pr(n)
-    const rec = { id: uuidv4(), projectId: p.id, vendor, invoiceNumber: no, invoiceDate: D(d), dueDate: D(due), amount, paidAmount: paid, outstanding: amount - paid, status, notes: '', createdAt: new Date(Date.now() + d * 86400000).toISOString(), updatedAt: now, createdBy: 'Fitri Finance' }
+    const po = poOf(n)
+    const rec = { id: uuidv4(), projectId: p.id, poId: po?.id || null, poNumber: po?.poNumber || '', vendor, invoiceNumber: no, invoiceDate: D(d), dueDate: D(due), amount, paidAmount: paid, outstanding: amount - paid, status, notes: '', createdAt: new Date(Date.now() + d * 86400000).toISOString(), updatedAt: now, createdBy: 'Fitri Finance' }
     addDoc('invoices-in', rec.id, p.id, `${no}.pdf`, 'Invoice', 'Fitri Finance', -d)
     return rec
   })
@@ -1230,7 +1363,8 @@ async function seedDatabase(db, reset = false) {
   ]
   const invOut = IO.map(([n, no, d, due, amount, paid, status]) => {
     const p = pr(n)
-    const rec = { id: uuidv4(), projectId: p.id, customer: p.customer, invoiceNumber: no, invoiceDate: D(d), dueDate: D(due), amount, paidAmount: paid, outstanding: amount - paid, status, notes: '', createdAt: new Date(Date.now() + d * 86400000).toISOString(), updatedAt: now, createdBy: 'Fitri Finance' }
+    const po = poOf(n)
+    const rec = { id: uuidv4(), projectId: p.id, poId: po?.id || null, poNumber: po?.poNumber || '', customer: p.customer, invoiceNumber: no, invoiceDate: D(d), dueDate: D(due), amount, paidAmount: paid, outstanding: amount - paid, status, notes: '', createdAt: new Date(Date.now() + d * 86400000).toISOString(), updatedAt: now, createdBy: 'Fitri Finance' }
     addDoc('invoices-out', rec.id, p.id, `${no}.pdf`, 'Invoice', 'Fitri Finance', -d)
     return rec
   })

@@ -20,10 +20,10 @@ import { STAGES } from '@/lib/stage-config'
 import { api, fetcher, canWrite, formatIDR, formatCompact, formatPct, formatNumber, formatDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
-const STAGE_ORDER = ['Approach', 'Penawaran', 'PO', 'Schedule', 'BAST', 'Invoice In', 'Invoice Out', 'Closed']
+const STAGE_ORDER = ['Approach', 'Penawaran', 'PO Masuk', 'Schedule', 'BAST', 'Invoice In', 'Invoice Out', 'Closed']
 const TABS = [
   { key: 'quotations', label: 'Penawaran', dataKey: 'quotations' },
-  { key: 'pos', label: 'PO', dataKey: 'pos' },
+  { key: 'pos', label: 'PO Masuk', dataKey: 'pos' },
   { key: 'schedules', label: 'Schedule', dataKey: 'schedules' },
   { key: 'basts', label: 'BAST', dataKey: 'basts' },
   { key: 'invoices-in', label: 'Invoice In', dataKey: 'invoicesIn' },
@@ -76,7 +76,7 @@ export default function ProjectDetailPage() {
   const timeline = [
     ...data.approaches.map((r) => ({ date: r.approachDate || r.createdAt, label: 'Approach', text: `${r.companyName} · ${r.status}` })),
     ...data.quotations.map((r) => ({ date: r.quotationDate || r.createdAt, label: 'Penawaran', text: `${r.quotationNumber} · ${formatCompact(r.revenue)} · ${r.status}` })),
-    ...data.pos.map((r) => ({ date: r.poDate || r.createdAt, label: 'PO', text: `${r.poNumber} · ${formatNumber(r.quantity)} ${r.unit} · ${r.status}` })),
+    ...data.pos.map((r) => ({ date: r.poDate || r.createdAt, label: 'PO Masuk', text: `${r.poNumber} · ${formatNumber(r.quantity)} ${r.unit} · ${r.status}` })),
     ...data.schedules.map((r) => ({ date: r.actualDate || r.scheduleDate, label: 'Schedule', text: `${r.deliveryNumber} · ${formatNumber(r.qty)} ${r.unit} · ${r.status}` })),
     ...data.basts.map((r) => ({ date: r.bastDate, label: 'BAST', text: `${r.bastNumber} · ${formatNumber(r.qty)} ${r.unit} · ${r.status}` })),
     ...data.invoicesIn.map((r) => ({ date: r.invoiceDate, label: 'Invoice In', text: `${r.invoiceNumber} · ${formatCompact(r.amount)} · ${r.status}` })),
@@ -119,16 +119,104 @@ export default function ProjectDetailPage() {
           })}
         </div>
 
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-          <Stat label="Revenue" value={formatCompact(p.revenue)} sub={formatIDR(p.revenue)} />
-          <Stat label="HPP" value={formatCompact(p.hpp)} sub={formatIDR(p.hpp)} />
-          <Stat label="Margin" value={formatCompact(p.margin)} sub={`${formatPct(p.marginPct)} margin`} />
-          <Stat label="Piutang / Utang" value={formatCompact(p.piutang, false)} sub={`Utang ${formatCompact(p.utang, false)}`} />
+        {/* Commercial Comparison Blocks */}
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Perbandingan Komersial</span>
+            <span className="text-xs text-muted-foreground">Sumber Diakui: <strong className="text-foreground">PO Masuk</strong></span>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            {/* Blok 1: Penawaran / Projected */}
+            <div className="rounded-xl border bg-slate-50/70 dark:bg-slate-900/40 p-3.5 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-slate-800 dark:text-slate-200">1. PENAWARAN (PROJECTED)</span>
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-200/80 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-medium">Estimasi</span>
+              </div>
+              <div className="space-y-1.5 text-xs">
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Estimasi Revenue:</span>
+                  <span className="font-semibold tabular">{formatIDR(Number(p.projectedRevenue || 0))}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Estimasi HPP:</span>
+                  <span className="tabular text-muted-foreground">{formatIDR(Number(p.projectedHpp || 0))}</span>
+                </div>
+                <div className="flex justify-between pt-1.5 border-t border-dashed">
+                  <span className="text-muted-foreground font-medium">Estimasi Margin:</span>
+                  <span className="font-semibold tabular text-teal-700 dark:text-teal-400">
+                    {formatIDR(Number(p.projectedMargin || 0))} ({formatPct(Number(p.projectedMarginPct || 0))})
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Blok 2: PO Masuk / Final (Recognized) */}
+            <div className="rounded-xl border border-blue-200/80 bg-blue-50/40 dark:bg-blue-950/20 p-3.5 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-blue-900 dark:text-blue-200">2. PO MASUK / FINAL (RECOGNIZED)</span>
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-100 dark:bg-blue-900/60 text-blue-800 dark:text-blue-300 font-medium">Nilai Diakui</span>
+              </div>
+              <div className="space-y-1.5 text-xs">
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Nilai Akhir PO:</span>
+                  <span className="font-bold tabular text-blue-900 dark:text-blue-100">{formatIDR(Number(p.revenue || 0))}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">HPP Final:</span>
+                  <span className="tabular text-muted-foreground">{formatIDR(Number(p.hpp || 0))}</span>
+                </div>
+                <div className="flex justify-between pt-1.5 border-t border-dashed border-blue-200 dark:border-blue-800">
+                  <span className="text-muted-foreground font-medium">Margin Final:</span>
+                  <span className="font-bold tabular text-teal-700 dark:text-teal-400">
+                    {formatIDR(Number(p.margin || 0))} ({formatPct(Number(p.marginPct || 0))})
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Blok 3: Variance */}
+            {(() => {
+              const valVar = Number(p.revenue || 0) - Number(p.projectedRevenue || 0)
+              const marginVar = Number(p.margin || 0) - Number(p.projectedMargin || 0)
+              return (
+                <div className="rounded-xl border bg-muted/20 p-3.5 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-foreground">3. COMMERCIAL VARIANCE</span>
+                    <span className={cn(
+                      'text-[10px] px-2 py-0.5 rounded-full font-medium',
+                      valVar > 0 ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300' : valVar < 0 ? 'bg-rose-100 text-rose-800 dark:bg-rose-950/60 dark:text-rose-300' : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
+                    )}>
+                      {valVar > 0 ? '▲ Naik' : valVar < 0 ? '▼ Turun' : 'Sesuai Penawaran'}
+                    </span>
+                  </div>
+                  <div className="space-y-1.5 text-xs">
+                    <div className="flex justify-between items-center">
+                      <span className="text-muted-foreground">Value Variance:</span>
+                      <span className={cn('font-semibold tabular', valVar > 0 ? 'text-emerald-600 dark:text-emerald-400' : valVar < 0 ? 'text-rose-600 dark:text-rose-400' : 'text-muted-foreground')}>
+                        {valVar > 0 ? `+${formatIDR(valVar)}` : formatIDR(valVar)}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-muted-foreground">Margin Variance:</span>
+                      <span className={cn('font-semibold tabular', marginVar > 0 ? 'text-emerald-600 dark:text-emerald-400' : marginVar < 0 ? 'text-rose-600 dark:text-rose-400' : 'text-muted-foreground')}>
+                        {marginVar > 0 ? `+${formatIDR(marginVar)}` : formatIDR(marginVar)}
+                      </span>
+                    </div>
+                    <div className="pt-1.5 border-t border-dashed flex justify-between text-[11px] text-muted-foreground">
+                      <span>Piutang: <strong className="text-foreground">{formatCompact(p.piutang, false)}</strong></span>
+                      <span>Utang: <strong className="text-foreground">{formatCompact(p.utang, false)}</strong></span>
+                    </div>
+                  </div>
+                </div>
+              )
+            })()}
+          </div>
         </div>
+
         <div className="rounded-xl border p-3">
           <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
             <span className="font-medium">Progress pengiriman</span>
-            <span className="text-xs text-muted-foreground tabular">PO {formatNumber(p.poQty)} {p.unit} · Delivered {formatNumber(p.deliveredQty)} · Remaining {formatNumber(p.remainingQty)} {p.unit}</span>
+            <span className="text-xs text-muted-foreground tabular">PO Masuk {formatNumber(p.poQty)} {p.unit} · Delivered {formatNumber(p.deliveredQty)} · Remaining {formatNumber(p.remainingQty)} {p.unit}</span>
           </div>
           <div className="flex items-center gap-3 mt-2"><Progress value={p.completionPct || 0} className="h-2" /><span className="text-sm font-semibold tabular w-12 text-right">{p.completionPct || 0}%</span></div>
         </div>

@@ -60,9 +60,9 @@ export default function SummaryPage() {
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <KpiCard label="Omzet" value={formatCompact(k.omzet)} icon={Wallet} tone="blue" loading={isLoading} sub={k.revenueBasis === 'po_value' ? 'Basis: PO Value' : k.revenueBasis === 'completed_project' ? 'Basis: Project selesai' : 'Basis: Invoice Out'} />
-        <KpiCard label="Margin" value={formatCompact(k.margin)} icon={TrendingUp} tone="teal" loading={isLoading} sub="Revenue - HPP project" />
-        <KpiCard label="Margin %" value={formatPct(k.marginPct)} icon={Percent} tone="teal" loading={isLoading} sub="Total margin / total revenue" />
+        <KpiCard label="Omzet" value={formatCompact(k.omzet)} icon={Wallet} tone="blue" loading={isLoading} sub="Sumber: PO Masuk (Nilai Akhir PO)" />
+        <KpiCard label="Margin" value={formatCompact(k.margin)} icon={TrendingUp} tone="teal" loading={isLoading} sub="Margin dari PO Masuk" />
+        <KpiCard label="Margin %" value={formatPct(k.marginPct)} icon={Percent} tone="teal" loading={isLoading} sub="Margin / Nilai Akhir PO" />
         <KpiCard label="Piutang" value={formatCompact(k.piutang)} icon={ArrowUpRight} tone="green" loading={isLoading} sub="Outstanding invoice out" />
         <KpiCard label="Utang" value={formatCompact(k.utang)} icon={ArrowDownLeft} tone="amber" loading={isLoading} sub="Outstanding invoice vendor" />
         <KpiCard label="Stok" value={formatCompact(k.stok)} icon={Boxes} tone="slate" loading={isLoading} sub="Dilaporkan manual" />
@@ -72,7 +72,7 @@ export default function SummaryPage() {
 
       {isLoading ? <div className="grid md:grid-cols-2 gap-4">{[...Array(4)].map((_, i) => <Skeleton key={i} className="h-72 rounded-2xl" />)}</div> : (
         <div className="grid md:grid-cols-2 gap-4">
-          <ChartCard title="Omzet per Bulan" subtitle="Berdasarkan tanggal Invoice Out, 6 bulan terakhir">
+          <ChartCard title="Omzet per Bulan" subtitle="Berdasarkan tanggal PO Masuk (Nilai Akhir PO), 6 bulan terakhir">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={data.byMonth} margin={{ left: 0, right: 8, top: 8, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e7eb" />
@@ -83,7 +83,7 @@ export default function SummaryPage() {
               </BarChart>
             </ResponsiveContainer>
           </ChartCard>
-          <ChartCard title="Margin per Bulan" subtitle="Estimasi margin dari omzet bulanan x margin % project">
+          <ChartCard title="Margin per Bulan" subtitle="Margin dari PO Masuk bulanan">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={data.byMonth} margin={{ left: 0, right: 8, top: 8, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e7eb" />
@@ -94,7 +94,7 @@ export default function SummaryPage() {
               </LineChart>
             </ResponsiveContainer>
           </ChartCard>
-          <ChartCard title="Kontribusi Trading vs Logistics" subtitle="Berdasarkan omzet Invoice Out">
+          <ChartCard title="Kontribusi Trading vs Logistics" subtitle="Berdasarkan omzet PO Masuk">
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
                 <Pie data={data.contribution} dataKey="value" nameKey="name" innerRadius={55} outerRadius={85} paddingAngle={3}>

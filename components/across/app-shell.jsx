@@ -25,7 +25,7 @@ export const NAV = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/approach', label: 'Approach', icon: Handshake },
   { href: '/penawaran', label: 'Penawaran', icon: FileText },
-  { href: '/po', label: 'PO', icon: FileCheck2 },
+  { href: '/po', label: 'PO Masuk', icon: FileCheck2 },
   { href: '/schedule', label: 'Schedule', icon: Truck },
   { href: '/bast', label: 'BAST', icon: ClipboardCheck },
   { href: '/invoice-in', label: 'Invoice In', icon: ArrowDownLeft },
@@ -116,7 +116,7 @@ function GlobalSearch() {
   return (
     <>
       <button onClick={() => setOpen(true)} className="hidden sm:flex items-center gap-2 h-9 w-64 lg:w-80 rounded-lg border bg-card px-3 text-sm text-muted-foreground hover:bg-muted/60">
-        <Search className="h-4 w-4" /> <span className="flex-1 text-left">Cari project, PO, invoice...</span><kbd className="text-[10px] border rounded px-1">⌘K</kbd>
+        <Search className="h-4 w-4" /> <span className="flex-1 text-left">Cari project, PO Masuk, invoice...</span><kbd className="text-[10px] border rounded px-1">⌘K</kbd>
       </button>
       <Button variant="ghost" size="icon" className="sm:hidden" onClick={() => setOpen(true)}><Search className="h-5 w-5" /></Button>
       <Dialog open={open} onOpenChange={setOpen}>
@@ -124,7 +124,7 @@ function GlobalSearch() {
           <DialogTitle className="sr-only">Global search</DialogTitle>
           <div className="flex items-center gap-2 border-b px-3">
             <Search className="h-4 w-4 text-muted-foreground" />
-            <Input autoFocus value={term} onChange={(e) => setTerm(e.target.value)} placeholder="Project ID, customer, PO, quotation, invoice, BAST..." className="border-0 focus-visible:ring-0 shadow-none h-12" />
+            <Input autoFocus value={term} onChange={(e) => setTerm(e.target.value)} placeholder="Project ID, customer, PO Masuk, quotation, invoice, BAST..." className="border-0 focus-visible:ring-0 shadow-none h-12" />
           </div>
           <div className="max-h-80 overflow-y-auto p-2">
             {q.length < 2 && <p className="text-xs text-muted-foreground p-3">Ketik minimal 2 karakter.</p>}

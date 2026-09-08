@@ -23,8 +23,8 @@ import { ResponsiveDrawer } from './responsive-drawer'
 import { CurrencyInput } from './currency-input'
 import { RecordDocuments, uploadFile, fileIcon } from './documents'
 import { useAuth } from './auth-context'
-import { STAGES, FIELD_LABELS, CURRENCY_FIELDS, DATE_FIELDS, PCT_FIELDS, QTY_FIELDS } from '@/lib/stage-config'
-import { api, fetcher, canWrite, formatIDR, formatCompact, formatDate, formatNumber, formatPct, daysUntil } from '@/lib/format'
+import { STAGES, FIELD_LABELS, CURRENCY_FIELDS, DATE_FIELDS, ACTUAL_DATE_FIELDS, PCT_FIELDS, QTY_FIELDS } from '@/lib/stage-config'
+import { api, fetcher, canWrite, formatIDR, formatCompact, formatDate, formatNumber, formatPct, daysUntil, todayISO } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
 const NONE = '__none__'
@@ -223,6 +223,10 @@ export function RecordForm({ config, initial = {}, meta, onSaved, onCancel, lock
   const { data: schedData } = useSWR(hasSchedule && values.projectId ? `/api/schedules?projectId=${values.projectId}&limit=200` : null, fetcher)
   const schedules = schedData?.items || []
 
+  const hasQuotation = config.sections.some((s) => s.fields.some((f) => f.type === 'quotation'))
+  const { data: quotData } = useSWR(hasQuotation ? (values.projectId ? `/api/quotations?projectId=${values.projectId}&limit=200` : '/api/quotations?limit=200') : null, fetcher)
+  const quotations = quotData?.items || []
+
   const set = (name, v) => setValues((prev) => ({ ...prev, [name]: v }))
 
   const onProjectChange = (pid) => {
@@ -236,14 +240,39 @@ export function RecordForm({ config, initial = {}, meta, onSaved, onCancel, lock
         if ('projectName' in next && !prev.projectName) next.projectName = p.projectName
         if ('unit' in next && !prev.unit && p.unit) next.unit = p.unit
         if ('poId' in next && prev.projectId !== pid) next.poId = ''
+        if ('quotationId' in next && prev.projectId !== pid) next.quotationId = ''
       }
       return next
     })
   }
+
+  const onQuotationChange = (qid) => {
+    const q = quotations.find((x) => x.id === qid)
+    setValues((prev) => ({
+      ...prev,
+      quotationId: qid,
+      quotationNumber: q?.quotationNumber || prev.quotationNumber || '',
+      customer: prev.customer || q?.customer || '',
+      salesPic: prev.salesPic || q?.salesPic || '',
+      businessLine: prev.businessLine || q?.businessLine || '',
+      poValue: prev.poValue || q?.revenue || '',
+      hppFinal: prev.hppFinal || q?.hpp || '',
+      unit: prev.unit || q?.unit || '',
+      projectId: prev.projectId || q?.projectId || '',
+    }))
+  }
+
   const onPoChange = (poId) => {
     const po = pos.find((x) => x.id === poId)
-    setValues((prev) => ({ ...prev, poId, poNumber: po?.poNumber || prev.poNumber || '', unit: prev.unit || po?.unit || '' }))
+    setValues((prev) => ({
+      ...prev,
+      poId,
+      poNumber: po?.poNumber || prev.poNumber || '',
+      unit: prev.unit || po?.unit || '',
+      customer: prev.customer || po?.customer || '',
+    }))
   }
+
   const onScheduleChange = (sid) => {
     const s = schedules.find((x) => x.id === sid)
     setValues((prev) => ({ ...prev, deliveryRef: sid, poId: s?.poId || prev.poId, deliveryNumber: s?.deliveryNumber || '', qty: prev.qty || s?.qty || '', unit: prev.unit || s?.unit || '' }))
@@ -251,16 +280,28 @@ export function RecordForm({ config, initial = {}, meta, onSaved, onCancel, lock
 
   const submit = async (e) => {
     e.preventDefault()
+    // Required fields check
     for (const s of config.sections) for (const f of s.fields) {
       if (f.required && (values[f.name] === '' || values[f.name] === undefined || values[f.name] === null)) {
         toast.error(`${f.label} wajib diisi`)
         return
       }
     }
+    // Date validation: Actual/transaction date cannot exceed today
+    for (const s of config.sections) for (const f of s.fields) {
+      if (f.type === 'date' && ACTUAL_DATE_FIELDS.has(f.name) && values[f.name]) {
+        if (values[f.name] > todayISO()) {
+          toast.error('Tanggal tidak boleh melebihi hari ini.')
+          return
+        }
+      }
+    }
+
     setSaving(true)
     try {
       const payload = { ...values }
       if (payload.poId) payload.poNumber = pos.find((x) => x.id === payload.poId)?.poNumber || payload.poNumber
+      if (payload.quotationId) payload.quotationNumber = quotations.find((x) => x.id === payload.quotationId)?.quotationNumber || payload.quotationNumber
       const saved = isEdit ? await api(`/api/${config.key}/${initial.id}`, { method: 'PUT', body: payload }) : await api(`/api/${config.key}`, { method: 'POST', body: payload })
       if (pending.length) {
         for (let i = 0; i < pending.length; i++) {
@@ -290,8 +331,25 @@ export function RecordForm({ config, initial = {}, meta, onSaved, onCancel, lock
         return <CurrencyInput {...common} value={v} onChange={(x) => set(f.name, x)} />
       case 'number':
         return <Input {...common} type="number" inputMode="decimal" value={v} onChange={(e) => set(f.name, e.target.value)} className="tabular" />
-      case 'date':
-        return <Input {...common} type="date" value={v || ''} onChange={(e) => set(f.name, e.target.value)} />
+      case 'date': {
+        const isActual = ACTUAL_DATE_FIELDS.has(f.name)
+        const isFutureInvalid = isActual && Boolean(v && v > todayISO())
+        return (
+          <div className="space-y-1">
+            <Input
+              {...common}
+              type="date"
+              value={v || ''}
+              max={isActual ? todayISO() : undefined}
+              onChange={(e) => set(f.name, e.target.value)}
+              className={cn(isFutureInvalid && 'border-red-500 focus-visible:ring-red-500')}
+            />
+            {isFutureInvalid && (
+              <p className="text-[11px] text-red-600 font-medium">Tanggal tidak boleh melebihi hari ini.</p>
+            )}
+          </div>
+        )
+      }
       case 'textarea':
         return <Textarea {...common} rows={2} value={v || ''} onChange={(e) => set(f.name, e.target.value)} />
       case 'status':
@@ -313,14 +371,30 @@ export function RecordForm({ config, initial = {}, meta, onSaved, onCancel, lock
             </SelectContent>
           </Select>
         )
+      case 'quotation': {
+        const list = quotations.filter((q) => !values.projectId || q.projectId === values.projectId)
+        return (
+          <Select value={v || NONE} onValueChange={(x) => onQuotationChange(x === NONE ? '' : x)}>
+            <SelectTrigger id={f.name}><SelectValue placeholder={values.projectId ? 'Pilih penawaran' : 'Pilih penawaran'} /></SelectTrigger>
+            <SelectContent className="max-h-72">
+              <SelectItem value={NONE}><span className="text-muted-foreground">-</span></SelectItem>
+              {list.map((q) => (
+                <SelectItem key={q.id} value={q.id}>
+                  <span className="font-medium">{q.quotationNumber}</span> · {q.customer} · {formatCompact(q.revenue, false)} ({q.status})
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )
+      }
       case 'po': {
         const list = pos.filter((p) => !values.projectId || p.projectId === values.projectId)
         return (
           <Select value={v || NONE} onValueChange={(x) => onPoChange(x === NONE ? '' : x)}>
-            <SelectTrigger id={f.name}><SelectValue placeholder={values.projectId ? 'Pilih PO' : 'Pilih project dulu'} /></SelectTrigger>
-            <SelectContent>
+            <SelectTrigger id={f.name}><SelectValue placeholder={values.projectId ? 'Pilih PO Masuk' : 'Pilih project dulu'} /></SelectTrigger>
+            <SelectContent className="max-h-72">
               <SelectItem value={NONE}><span className="text-muted-foreground">-</span></SelectItem>
-              {list.map((p) => <SelectItem key={p.id} value={p.id}>{p.poNumber} · {formatNumber(p.quantity)} {p.unit}</SelectItem>)}
+              {list.map((p) => <SelectItem key={p.id} value={p.id}>{p.poNumber} · {p.customer ? `${p.customer} · ` : ''}{formatNumber(p.quantity)} {p.unit}</SelectItem>)}
             </SelectContent>
           </Select>
         )
