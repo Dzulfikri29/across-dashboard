@@ -4,7 +4,7 @@ import { Suspense, useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import useSWR from 'swr'
-import { Wallet, TrendingUp, ArrowUpRight, ArrowDownLeft, Boxes, ChevronRight, AlertTriangle, AlertCircle, Info, Paperclip, CheckCircle2, Target } from 'lucide-react'
+import { Wallet, TrendingUp, ArrowUpRight, ArrowDownLeft, Boxes, ChevronRight, AlertTriangle, AlertCircle, Info, Paperclip, CheckCircle2, Percent } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -103,8 +103,8 @@ function DashboardInner() {
 
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
         <KpiCard label="Omzet" value={formatCompact(k.omzet)} sub="Sumber: PO Masuk (Nilai Akhir PO)" icon={Wallet} tone="blue" loading={isLoading} />
-        <KpiCard label="Potential Pipeline" value={formatCompact(k.potentialPipeline)} sub="Proyeksi Penawaran berjalan" icon={Target} tone="indigo" loading={isLoading} />
-        <KpiCard label="Margin" value={formatCompact(k.margin)} sub={`${formatPct(k.marginPct)} dari Nilai Akhir PO`} icon={TrendingUp} tone="teal" loading={isLoading} />
+        <KpiCard label="Margin" value={formatCompact(k.margin)} sub="Margin dari PO Masuk" icon={TrendingUp} tone="teal" loading={isLoading} />
+        <KpiCard label="Margin %" value={formatPct(k.marginPct)} sub="Margin / Nilai Akhir PO" icon={Percent} tone="teal" loading={isLoading} />
         <KpiCard label="Piutang" value={formatCompact(k.piutang)} sub="Outstanding invoice out" icon={ArrowUpRight} tone="green" loading={isLoading} />
         <KpiCard label="Utang" value={formatCompact(k.utang)} sub="Outstanding invoice vendor" icon={ArrowDownLeft} tone="amber" loading={isLoading} />
         <KpiCard label="Stok" value={formatCompact(k.stok)} sub="If applicable · dilaporkan manual" icon={Boxes} tone="slate" loading={isLoading} />

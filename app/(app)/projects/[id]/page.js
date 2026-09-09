@@ -75,12 +75,27 @@ export default function ProjectDetailPage() {
   // Overview timeline
   const timeline = [
     ...data.approaches.map((r) => ({ date: r.approachDate || r.createdAt, label: 'Approach', text: `${r.companyName} · ${r.status}` })),
-    ...data.quotations.map((r) => ({ date: r.quotationDate || r.createdAt, label: 'Penawaran', text: `${r.quotationNumber} · ${formatCompact(r.revenue)} · ${r.status}` })),
+    ...data.quotations.map((r) => {
+      const isDirect = r.source === 'Direct' || r.sourceDisplay === 'Direct Penawaran' || !r.approachId
+      return {
+        date: r.quotationDate || r.createdAt,
+        label: 'Penawaran',
+        text: `${r.quotationNumber} · ${formatCompact(r.revenue)} · ${isDirect ? 'Direct Penawaran (Tanpa Approach)' : 'Dari Approach'} · ${r.status}`
+      }
+    }),
     ...data.pos.map((r) => ({ date: r.poDate || r.createdAt, label: 'PO Masuk', text: `${r.poNumber} · ${formatNumber(r.quantity)} ${r.unit} · ${r.status}` })),
-    ...data.schedules.map((r) => ({ date: r.actualDate || r.scheduleDate, label: 'Schedule', text: `${r.deliveryNumber} · ${formatNumber(r.qty)} ${r.unit} · ${r.status}` })),
+    ...data.schedules.map((r) => ({
+      date: r.actualDate || r.scheduleDate,
+      label: 'Schedule',
+      text: `${r.deliveryNumber} · Planned: ${formatNumber(r.plannedQty || r.qty || 0)}${r.actualDeliveredQty != null ? ` · Delivered: ${formatNumber(r.actualDeliveredQty)}` : ''} ${r.unit} · ${r.status}`
+    })),
     ...data.basts.map((r) => ({ date: r.bastDate, label: 'BAST', text: `${r.bastNumber} · ${formatNumber(r.qty)} ${r.unit} · ${r.status}` })),
     ...data.invoicesIn.map((r) => ({ date: r.invoiceDate, label: 'Invoice In', text: `${r.invoiceNumber} · ${formatCompact(r.amount)} · ${r.status}` })),
-    ...data.invoicesOut.map((r) => ({ date: r.invoiceDate, label: 'Invoice Out', text: `${r.invoiceNumber} · ${formatCompact(r.amount)} · ${r.status}` })),
+    ...data.invoicesOut.map((r) => ({
+      date: r.invoiceDate,
+      label: 'Invoice Out',
+      text: `${r.invoiceNumber} · Qty: ${formatNumber(r.quantity || 0)} · ${formatCompact(r.amount)} · ${r.status}`
+    })),
   ].sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')))
 
   return (
@@ -106,12 +121,26 @@ export default function ProjectDetailPage() {
         {/* Stage tracker */}
         <div className="flex items-center gap-1 overflow-x-auto no-scrollbar -mx-1 px-1">
           {STAGE_ORDER.map((s, i) => {
+            const isDirectApproach = s === 'Approach' && (p.penawaranSource === 'Direct' || (!p.hasApproach && data.approaches?.length === 0))
             const done = i < stageIdx
             const current = i === stageIdx
             return (
               <div key={s} className="flex items-center shrink-0">
-                <div className={cn('flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium border', done && 'bg-emerald-50 text-emerald-700 border-emerald-200', current && 'bg-primary text-white border-primary', !done && !current && 'bg-muted/40 text-muted-foreground')}>
-                  {done ? <Check className="h-3 w-3" /> : <span className={cn('h-1.5 w-1.5 rounded-full', current ? 'bg-white' : 'bg-muted-foreground/40')} />}{s}
+                <div className={cn(
+                  'flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium border',
+                  isDirectApproach && 'bg-slate-100 text-slate-500 border-dashed border-slate-300 dark:bg-slate-800/60 dark:text-slate-400',
+                  !isDirectApproach && done && 'bg-emerald-50 text-emerald-700 border-emerald-200',
+                  !isDirectApproach && current && 'bg-primary text-white border-primary',
+                  !isDirectApproach && !done && !current && 'bg-muted/40 text-muted-foreground'
+                )}>
+                  {isDirectApproach ? (
+                    <span className="text-[9px] uppercase tracking-wide px-1 rounded bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300 font-semibold">Dilewati</span>
+                  ) : done ? (
+                    <Check className="h-3 w-3" />
+                  ) : (
+                    <span className={cn('h-1.5 w-1.5 rounded-full', current ? 'bg-white' : 'bg-muted-foreground/40')} />
+                  )}
+                  {isDirectApproach ? 'Direct Penawaran (Tanpa Approach)' : s}
                 </div>
                 {i < STAGE_ORDER.length - 1 && <span className={cn('h-px w-3 md:w-5', i < stageIdx ? 'bg-emerald-300' : 'bg-border')} />}
               </div>
@@ -213,12 +242,58 @@ export default function ProjectDetailPage() {
           </div>
         </div>
 
-        <div className="rounded-xl border p-3">
-          <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
-            <span className="font-medium">Progress pengiriman</span>
-            <span className="text-xs text-muted-foreground tabular">PO Masuk {formatNumber(p.poQty)} {p.unit} · Delivered {formatNumber(p.deliveredQty)} · Remaining {formatNumber(p.remainingQty)} {p.unit}</span>
+        {/* Operational Traceability Widget */}
+        <div className="rounded-xl border bg-muted/20 p-3.5 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Traceability Operasional (PO → Delivered → BAST → Invoiced)</span>
+            <span className="text-xs text-muted-foreground tabular">Satuan: <strong className="text-foreground">{p.unit || 'unit'}</strong></span>
           </div>
-          <div className="flex items-center gap-3 mt-2"><Progress value={p.completionPct || 0} className="h-2" /><span className="text-sm font-semibold tabular w-12 text-right">{p.completionPct || 0}%</span></div>
+
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-center">
+            <div className="rounded-lg border bg-card p-2.5">
+              <p className="text-[10px] uppercase font-semibold text-muted-foreground">1. PO Masuk</p>
+              <p className="text-base md:text-lg font-bold tabular mt-0.5">{formatNumber(p.poQty || 0)}</p>
+              <p className="text-[10px] text-muted-foreground">{p.unit || 'unit'}</p>
+            </div>
+            <div className="rounded-lg border bg-card p-2.5">
+              <p className="text-[10px] uppercase font-semibold text-muted-foreground">2. Terkirim (Delivered)</p>
+              <p className="text-base md:text-lg font-bold tabular text-blue-600 mt-0.5">{formatNumber(p.deliveredQty || 0)}</p>
+              <p className="text-[10px] text-muted-foreground">{p.poQty > 0 ? `${Math.round(((p.deliveredQty || 0) / p.poQty) * 100)}% dari PO` : '-'}</p>
+            </div>
+            <div className="rounded-lg border bg-card p-2.5">
+              <p className="text-[10px] uppercase font-semibold text-muted-foreground">3. BAST Fisik</p>
+              <p className="text-base md:text-lg font-bold tabular text-teal-600 mt-0.5">{formatNumber(p.bastQty || 0)}</p>
+              <p className="text-[10px] text-muted-foreground">{p.deliveredQty > 0 ? `${Math.round(((p.bastQty || 0) / p.deliveredQty) * 100)}% ter-BAST` : '-'}</p>
+            </div>
+            <div className="rounded-lg border bg-card p-2.5">
+              <p className="text-[10px] uppercase font-semibold text-muted-foreground">4. Invoiced Out</p>
+              <p className="text-base md:text-lg font-bold tabular text-emerald-600 mt-0.5">{formatNumber(p.invoicedQty || 0)}</p>
+              <p className="text-[10px] text-muted-foreground">{p.bastQty > 0 ? `${Math.round(((p.invoicedQty || 0) / p.bastQty) * 100)}% tertagih` : '-'}</p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-2 pt-1">
+            <div className="flex items-center justify-between text-xs px-2.5 py-1.5 rounded-md bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/50">
+              <span className="text-amber-800 dark:text-amber-300">Sisa Belum Terkirim:</span>
+              <span className="font-bold tabular text-amber-900 dark:text-amber-200">{formatNumber(p.poRemainingQty ?? p.remainingQty ?? 0)} {p.unit || 'unit'}</span>
+            </div>
+            <div className="flex items-center justify-between text-xs px-2.5 py-1.5 rounded-md bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900/50">
+              <span className="text-blue-800 dark:text-blue-300">Terkirim Belum BAST:</span>
+              <span className="font-bold tabular text-blue-900 dark:text-blue-200">{formatNumber(p.deliveredNotBastQty ?? 0)} {p.unit || 'unit'}</span>
+            </div>
+            <div className="flex items-center justify-between text-xs px-2.5 py-1.5 rounded-md bg-teal-50 dark:bg-teal-950/30 border border-teal-200 dark:border-teal-900/50">
+              <span className="text-teal-800 dark:text-teal-300">BAST Belum Ditagihkan:</span>
+              <span className="font-bold tabular text-teal-900 dark:text-teal-200">{formatNumber(p.bastNotInvoicedQty ?? 0)} {p.unit || 'unit'}</span>
+            </div>
+          </div>
+
+          <div className="pt-1">
+            <div className="flex items-center justify-between text-xs text-muted-foreground mb-1">
+              <span>Progress Pemenuhan PO</span>
+              <span className="font-semibold tabular">{p.completionPct || 0}%</span>
+            </div>
+            <Progress value={p.completionPct || 0} className="h-2" />
+          </div>
         </div>
       </Card>
 

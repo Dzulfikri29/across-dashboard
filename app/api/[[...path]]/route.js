@@ -146,6 +146,45 @@ function validateActualDates(body) {
   return null
 }
 
+function validateQuantities(key, body) {
+  const isInvalid = (v) => {
+    if (v === null || v === undefined || v === '') return false
+    const n = Number(v)
+    return !Number.isFinite(n) || n <= 0
+  }
+
+  if (key === 'pos') {
+    if (body.quantity !== undefined && body.quantity !== null && body.quantity !== '') {
+      if (isInvalid(body.quantity)) return 'Qty harus lebih besar dari 0.'
+    }
+  }
+  if (key === 'schedules') {
+    const planned = body.plannedQty !== undefined && body.plannedQty !== '' ? body.plannedQty : body.qty
+    if (planned !== undefined && planned !== null && planned !== '') {
+      if (isInvalid(planned)) return 'Qty harus lebih besar dari 0.'
+    }
+    if (body.actualDeliveredQty !== undefined && body.actualDeliveredQty !== null && body.actualDeliveredQty !== '') {
+      if (isInvalid(body.actualDeliveredQty)) return 'Qty harus lebih besar dari 0.'
+    }
+  }
+  if (key === 'basts') {
+    if (body.qty !== undefined && body.qty !== null && body.qty !== '') {
+      if (isInvalid(body.qty)) return 'Qty harus lebih besar dari 0.'
+    }
+  }
+  if (key === 'invoices-out') {
+    if (body.quantity !== undefined && body.quantity !== null && body.quantity !== '') {
+      if (isInvalid(body.quantity)) return 'Qty harus lebih besar dari 0.'
+    }
+  }
+  if (key === 'stocks') {
+    if (body.currentStock !== undefined && body.currentStock !== null && body.currentStock !== '') {
+      if (isInvalid(body.currentStock)) return 'Qty harus lebih besar dari 0.'
+    }
+  }
+  return null
+}
+
 function hashPassword(password, salt = crypto.randomBytes(8).toString('hex')) {
   const hash = crypto.scryptSync(password, salt, 32).toString('hex')
   return `${salt}:${hash}`
@@ -208,6 +247,9 @@ function normalizeRecord(key, body) {
     rec.hpp = num(rec.hpp)
     rec.margin = rec.revenue - rec.hpp
     rec.marginPct = rec.revenue > 0 ? Math.round((rec.margin / rec.revenue) * 10000) / 100 : 0
+    rec.approachId = rec.approachId || null
+    rec.source = rec.approachId ? 'Approach' : (rec.source || 'Direct')
+    rec.sourceDisplay = rec.source === 'Approach' ? `Approach (${rec.approachId || '-'})` : 'Direct Penawaran'
   }
   if (key === 'pos') {
     rec.poValue = num(rec.poValue)
@@ -219,10 +261,29 @@ function normalizeRecord(key, body) {
     rec.marginPct = rec.marginFinalPct
     rec.quantity = num(rec.quantity)
   }
-  if (key === 'schedules' || key === 'basts') {
+  if (key === 'schedules') {
+    rec.plannedQty = num(rec.plannedQty !== undefined && rec.plannedQty !== '' ? rec.plannedQty : rec.qty)
+    rec.qty = rec.plannedQty
+    if (rec.actualDeliveredQty !== undefined && rec.actualDeliveredQty !== null && rec.actualDeliveredQty !== '') {
+      rec.actualDeliveredQty = num(rec.actualDeliveredQty)
+    } else {
+      rec.actualDeliveredQty = null
+    }
+  }
+  if (key === 'basts') {
     rec.qty = num(rec.qty)
   }
-  if (key === 'invoices-in' || key === 'invoices-out') {
+  if (key === 'invoices-in') {
+    rec.amount = num(rec.amount)
+    rec.paidAmount = num(rec.paidAmount)
+    rec.outstanding = Math.max(0, rec.amount - rec.paidAmount)
+    const today = todayISO()
+    if (rec.outstanding === 0 && rec.amount > 0) rec.status = 'Paid'
+    else if (rec.paidAmount > 0 && rec.outstanding > 0 && rec.status !== 'Overdue') rec.status = 'Partial Paid'
+    if (rec.outstanding > 0 && rec.dueDate && rec.dueDate < today && rec.status !== 'Draft') rec.status = 'Overdue'
+  }
+  if (key === 'invoices-out') {
+    rec.quantity = num(rec.quantity)
     rec.amount = num(rec.amount)
     rec.paidAmount = num(rec.paidAmount)
     rec.outstanding = Math.max(0, rec.amount - rec.paidAmount)
@@ -288,12 +349,20 @@ async function recomputeProject(db, projectId) {
   const poQty = activePos.reduce((s, p) => s + num(p.quantity), 0)
   const poValue = recognizedRevenue
   const unit = activePos[0]?.unit || primaryQ?.unit || project.unit || ''
-  const deliveredQty = schedules.filter((s) => s.status === 'Delivered').reduce((s, r) => s + num(r.qty), 0)
-  const scheduledQty = schedules.filter((s) => s.status !== 'Cancelled').reduce((s, r) => s + num(r.qty), 0)
+  const deliveredQty = schedules.reduce((s, r) => s + num(r.actualDeliveredQty !== null && r.actualDeliveredQty !== undefined ? r.actualDeliveredQty : (r.status === 'Delivered' ? r.qty : 0)), 0)
+  const scheduledQty = schedules.filter((s) => s.status !== 'Cancelled').reduce((s, r) => s + num(r.plannedQty || r.qty), 0)
   const bastQty = basts.reduce((s, b) => s + num(b.qty), 0)
+  const invoicedQty = invOut.reduce((s, i) => s + num(i.quantity || 0), 0)
   const invoicedOut = invOut.reduce((s, i) => s + num(i.amount), 0)
   const piutang = invOut.reduce((s, i) => s + num(i.outstanding), 0)
   const utang = invIn.reduce((s, i) => s + num(i.outstanding), 0)
+
+  const poRemainingQty = Math.max(0, poQty - deliveredQty)
+  const deliveredNotBastQty = Math.max(0, deliveredQty - bastQty)
+  const bastNotInvoicedQty = Math.max(0, bastQty - invoicedQty)
+
+  const hasApproach = approaches.length > 0 || quotations.some((q) => q.source === 'Approach' || q.approachId)
+  const penawaranSource = hasApproach ? 'Approach' : 'Direct'
 
   // current stage
   let stageIdx = 0
@@ -332,9 +401,15 @@ async function recomputeProject(db, projectId) {
     unit,
     deliveredQty,
     scheduledQty,
-    remainingQty: Math.max(0, poQty - deliveredQty),
+    remainingQty: poRemainingQty,
+    poRemainingQty,
     completionPct: poQty > 0 ? Math.min(100, Math.round((deliveredQty / poQty) * 100)) : 0,
     bastQty,
+    deliveredNotBastQty,
+    invoicedQty,
+    bastNotInvoicedQty,
+    hasApproach,
+    penawaranSource,
     invoicedOut,
     piutang,
     utang,
@@ -486,7 +561,6 @@ async function computeKpis(db, settings, filters = {}) {
   const hpp = posP.reduce((s, p) => s + num(p.hppFinal !== undefined ? p.hppFinal : p.hpp), 0)
   const margin = omzet - hpp
   const marginPct = omzet > 0 ? Math.round((margin / omzet) * 1000) / 10 : 0
-  const potentialPipeline = quotationsP.reduce((s, q) => s + num(q.revenue), 0)
 
   const piutang = invOut.reduce((s, i) => s + num(i.outstanding), 0)
   const utang = invIn.reduce((s, i) => s + num(i.outstanding), 0)
@@ -497,7 +571,6 @@ async function computeKpis(db, settings, filters = {}) {
     hpp,
     margin,
     marginPct,
-    potentialPipeline,
     totalRevenue: omzet,
     piutang,
     utang,
@@ -726,7 +799,7 @@ async function handleRoute(request, { params }) {
       const validPos = pos.filter((p) => ['Confirmed', 'Running', 'Completed'].includes(p.status))
       const pipeline = [
         { key: 'approach', label: 'Approach', count: approaches, href: '/approach' },
-        { key: 'penawaran', label: 'Penawaran', count: quotations.length, value: quotations.reduce((s, x) => s + num(x.revenue), 0), href: '/penawaran' },
+        { key: 'penawaran', label: 'Penawaran', count: quotations.length, href: '/penawaran' },
         { key: 'po', label: 'PO Masuk', count: validPos.length, value: validPos.reduce((s, x) => s + num(x.poValue), 0), href: '/po' },
         { key: 'schedule', label: 'Schedule', count: schedules, href: '/schedule' },
         { key: 'bast', label: 'BAST', count: basts, href: '/bast' },
@@ -939,18 +1012,49 @@ async function handleRoute(request, { params }) {
           const scheds = await db.collection('schedules').find({ poId: { $in: ids } }).toArray()
           items = items.map((p) => {
             const mine = scheds.filter((s) => s.poId === p.id)
-            const delivered = mine.filter((s) => s.status === 'Delivered').reduce((s, r) => s + num(r.qty), 0)
-            const scheduled = mine.filter((s) => s.status !== 'Cancelled').reduce((s, r) => s + num(r.qty), 0)
+            const delivered = mine.reduce((s, r) => s + num(r.actualDeliveredQty !== null && r.actualDeliveredQty !== undefined ? r.actualDeliveredQty : (r.status === 'Delivered' ? r.qty : 0)), 0)
+            const scheduled = mine.filter((s) => s.status !== 'Cancelled').reduce((s, r) => s + num(r.plannedQty || r.qty), 0)
             return { ...p, deliveredQty: delivered, scheduledQty: scheduled, remainingQty: Math.max(0, num(p.quantity) - delivered), completionPct: p.quantity > 0 ? Math.min(100, Math.round((delivered / p.quantity) * 100)) : 0, scheduleCount: mine.length }
           })
           if (filter === 'noSchedule') items = items.filter((p) => p.scheduleCount === 0 && ['Confirmed', 'Running'].includes(p.status))
         }
+        if (key === 'schedules') {
+          const bastsForScheds = await db.collection('basts').find({ deliveryRef: { $in: ids } }).toArray()
+          items = items.map((s) => {
+            const delivered = s.actualDeliveredQty !== null && s.actualDeliveredQty !== undefined ? num(s.actualDeliveredQty) : (s.status === 'Delivered' ? num(s.qty) : 0)
+            const myBasts = bastsForScheds.filter((b) => b.deliveryRef === s.id)
+            const bastedQty = myBasts.reduce((acc, b) => acc + num(b.qty), 0)
+            const remainingUnbastedQty = Math.max(0, delivered - bastedQty)
+            const isEligibleForBast = delivered > 0 && remainingUnbastedQty > 0 && ['Partial Delivered', 'Delivered', 'Partial'].includes(s.status)
+            return { ...s, plannedQty: s.plannedQty !== undefined ? s.plannedQty : s.qty, deliveredQty: delivered, bastedQty, remainingUnbastedQty, isEligibleForBast }
+          })
+        }
+        if (key === 'basts') {
+          const invOutForBasts = await db.collection('invoices_out').find({ bastId: { $in: ids } }).toArray()
+          items = items.map((b) => {
+            const myInvoices = invOutForBasts.filter((i) => i.bastId === b.id)
+            const invoicedQty = myInvoices.reduce((acc, i) => acc + num(i.quantity || 0), 0)
+            const remainingInvoiceableQty = Math.max(0, num(b.qty) - invoicedQty)
+            const isEligibleForInvoice = num(b.qty) > 0 && remainingInvoiceableQty > 0 && ['Partial', 'Complete', 'Verified'].includes(b.status)
+            return { ...b, invoicedQty, remainingInvoiceableQty, isEligibleForInvoice }
+          })
+        }
         if (filter === 'noDoc') items = items.filter((i) => i.docCount === 0)
         if (key === 'basts' && filter === 'missing') {
           // return delivered schedules without BAST as "pending" list marker
-          const delivered = await db.collection('schedules').find({ status: 'Delivered' }).toArray()
-          const refs = new Set(items.map((b) => b.deliveryRef))
-          const pending = delivered.filter((s) => !refs.has(s.id)).map(clean)
+          const deliveredScheds = await db.collection('schedules').find({
+            $or: [
+              { status: { $in: ['Delivered', 'Partial Delivered', 'Partial'] }, actualDeliveredQty: { $gt: 0 } },
+              { status: 'Delivered', qty: { $gt: 0 } },
+            ]
+          }).toArray()
+          const basts = await db.collection('basts').find({}).toArray()
+          const pending = deliveredScheds.filter((s) => {
+            const delivered = s.actualDeliveredQty !== null && s.actualDeliveredQty !== undefined ? num(s.actualDeliveredQty) : num(s.qty)
+            const myBasts = basts.filter((b) => b.deliveryRef === s.id)
+            const sumBasted = myBasts.reduce((acc, b) => acc + num(b.qty), 0)
+            return delivered > sumBasted
+          }).map(clean)
           return json({ items: [], total: 0, pendingSchedules: pending })
         }
 
@@ -981,6 +1085,8 @@ async function handleRoute(request, { params }) {
         const rawJson = await request.json()
         const dateErr = validateActualDates(rawJson)
         if (dateErr) return error(dateErr, 400)
+        const qtyErr = validateQuantities(key, rawJson)
+        if (qtyErr) return error(qtyErr, 400)
         const body = normalizeRecord(key, rawJson)
         const now = new Date().toISOString()
         if (key === 'users') {
@@ -994,7 +1100,7 @@ async function handleRoute(request, { params }) {
           body.projectId = body.projectId || (await nextProjectId(db))
           if (body.revenue || body.hpp) body.manualRevenue = true
         }
-        // auto-create project for quotations / approach if requested
+        // auto-create project for quotations / pos / approach if requested
         if (['quotations', 'pos', 'schedules', 'basts', 'invoices-in', 'invoices-out'].includes(key) && !body.projectId) {
           if (key === 'quotations' && body.customer) {
             const p = await ensureProject(db, body, user)
@@ -1023,14 +1129,70 @@ async function handleRoute(request, { params }) {
               return error('PO Masuk harus berasal dari Penawaran yang disetujui', 400)
             }
           }
+          if (num(body.quantity) <= 0) {
+            return error('Qty harus lebih besar dari 0.', 400)
+          }
         }
         if (key === 'schedules') {
           if (!body.poId) return error('PO Masuk wajib dipilih untuk Schedule', 400)
+          if (num(body.plannedQty || body.qty) <= 0) {
+            return error('Qty harus lebih besar dari 0.', 400)
+          }
+          if (body.actualDeliveredQty !== undefined && body.actualDeliveredQty !== null && body.actualDeliveredQty !== '') {
+            if (num(body.actualDeliveredQty) <= 0) {
+              return error('Qty harus lebih besar dari 0.', 400)
+            }
+          }
         }
         if (key === 'basts') {
           if (!body.poId || !body.deliveryRef) return error('PO Masuk dan Schedule (Delivery Ref) wajib dipilih untuk BAST', 400)
+          const sched = await db.collection('schedules').findOne({ id: body.deliveryRef })
+          if (!sched) return error('Schedule pengiriman tidak ditemukan', 400)
+          const delivered = sched.actualDeliveredQty !== null && sched.actualDeliveredQty !== undefined ? num(sched.actualDeliveredQty) : (sched.status === 'Delivered' ? num(sched.qty) : 0)
+          if (delivered <= 0) {
+            return error('BAST hanya dapat dibuat dari Schedule yang memiliki realisasi pengiriman (Actual Delivered Qty > 0).', 400)
+          }
+          if (['Not Started', 'Scheduled', 'Cancelled'].includes(sched.status)) {
+            return error('Status schedule belum memenuhi syarat untuk BAST. Status pengiriman harus memiliki realisasi kuantitas.', 400)
+          }
+          const bastQty = num(body.qty)
+          if (bastQty <= 0) {
+            return error('Qty harus lebih besar dari 0.', 400)
+          }
+          const existingBasts = await db.collection('basts').find({ deliveryRef: sched.id }).toArray()
+          const alreadyBasted = existingBasts.reduce((s, b) => s + num(b.qty), 0)
+          const remainingDelivery = Math.max(0, delivered - alreadyBasted)
+          if (bastQty > remainingDelivery) {
+            return error(`Qty BAST melebihi sisa quantity pengiriman yang belum dibuatkan BAST. Sisa: ${remainingDelivery} ${sched.unit || ''}`.trim(), 400)
+          }
+          body.deliveryNumber = sched.deliveryNumber
+          body.unit = body.unit || sched.unit
         }
-        if (key === 'invoices-in' || key === 'invoices-out') {
+        if (key === 'invoices-out') {
+          if (!body.bastId) return error('Invoice Out harus dibuat berdasarkan BAST.', 400)
+          const bast = await db.collection('basts').findOne({ id: body.bastId })
+          if (!bast) return error('BAST tidak ditemukan', 400)
+          if (!['Partial', 'Complete', 'Verified'].includes(bast.status)) {
+            return error('Invoice Out hanya dapat dibuat dari BAST yang berstatus Partial, Complete, atau Verified.', 400)
+          }
+          if (num(bast.qty) <= 0) {
+            return error('BAST tidak memiliki quantity valid.', 400)
+          }
+          const invQty = num(body.quantity)
+          if (invQty <= 0) {
+            return error('Qty harus lebih besar dari 0.', 400)
+          }
+          const existingInvoices = await db.collection('invoices_out').find({ bastId: bast.id }).toArray()
+          const alreadyInvoiced = existingInvoices.reduce((s, i) => s + num(i.quantity || 0), 0)
+          const remainingInvoiceable = Math.max(0, num(bast.qty) - alreadyInvoiced)
+          if (invQty > remainingInvoiceable) {
+            return error(`Qty invoice melebihi sisa quantity BAST yang belum ditagihkan. Sisa: ${remainingInvoiceable} ${bast.unit || ''}`.trim(), 400)
+          }
+          body.poId = body.poId || bast.poId
+          body.bastNumber = bast.bastNumber
+          body.unit = body.unit || bast.unit
+        }
+        if (key === 'invoices-in') {
           if (!body.poId) return error('PO Masuk wajib dipilih untuk Invoice', 400)
         }
         if (body.poId && !body.poNumber) {
@@ -1052,6 +1214,8 @@ async function handleRoute(request, { params }) {
         const patch = await request.json()
         const dateErr = validateActualDates(patch)
         if (dateErr) return error(dateErr, 400)
+        const qtyErr = validateQuantities(key, patch)
+        if (qtyErr) return error(qtyErr, 400)
         delete patch.id
         delete patch._id
         delete patch.createdAt
@@ -1066,6 +1230,43 @@ async function handleRoute(request, { params }) {
         if (key === 'projects') {
           if (patch.revenue !== undefined || patch.hpp !== undefined) merged.manualRevenue = true
           if (patch.status !== undefined) merged.statusOverride = patch.status || null
+        }
+        if (key === 'pos') {
+          if (num(merged.quantity) <= 0) return error('Qty harus lebih besar dari 0.', 400)
+        }
+        if (key === 'schedules') {
+          if (num(merged.plannedQty || merged.qty) <= 0) return error('Qty harus lebih besar dari 0.', 400)
+          if (merged.actualDeliveredQty !== undefined && merged.actualDeliveredQty !== null && merged.actualDeliveredQty !== '') {
+            if (num(merged.actualDeliveredQty) <= 0) return error('Qty harus lebih besar dari 0.', 400)
+          }
+        }
+        if (key === 'basts') {
+          const sched = await db.collection('schedules').findOne({ id: merged.deliveryRef })
+          if (sched) {
+            const delivered = sched.actualDeliveredQty !== null && sched.actualDeliveredQty !== undefined ? num(sched.actualDeliveredQty) : (sched.status === 'Delivered' ? num(sched.qty) : 0)
+            const bastQty = num(merged.qty)
+            if (bastQty <= 0) return error('Qty harus lebih besar dari 0.', 400)
+            const otherBasts = await db.collection('basts').find({ deliveryRef: sched.id, id: { $ne: id } }).toArray()
+            const alreadyBasted = otherBasts.reduce((s, b) => s + num(b.qty), 0)
+            const remainingDelivery = Math.max(0, delivered - alreadyBasted)
+            if (bastQty > remainingDelivery) {
+              return error(`Qty BAST melebihi sisa quantity pengiriman yang belum dibuatkan BAST. Sisa: ${remainingDelivery} ${sched.unit || ''}`.trim(), 400)
+            }
+          }
+        }
+        if (key === 'invoices-out') {
+          if (!merged.bastId) return error('Invoice Out harus dibuat berdasarkan BAST.', 400)
+          const bast = await db.collection('basts').findOne({ id: merged.bastId })
+          if (bast) {
+            const invQty = num(merged.quantity)
+            if (invQty <= 0) return error('Qty harus lebih besar dari 0.', 400)
+            const otherInvoices = await db.collection('invoices_out').find({ bastId: bast.id, id: { $ne: id } }).toArray()
+            const alreadyInvoiced = otherInvoices.reduce((s, i) => s + num(i.quantity || 0), 0)
+            const remainingInvoiceable = Math.max(0, num(bast.qty) - alreadyInvoiced)
+            if (invQty > remainingInvoiceable) {
+              return error(`Qty invoice melebihi sisa quantity BAST yang belum ditagihkan. Sisa: ${remainingInvoiceable} ${bast.unit || ''}`.trim(), 400)
+            }
+          }
         }
         if (merged.poId && !merged.poNumber) {
           const po = await db.collection('pos').findOne({ id: merged.poId })
@@ -1238,8 +1439,12 @@ async function seedDatabase(db, reset = false) {
   ]
   const quotations = Q.map(([n, no, rev, hpp, status, d, unit, hasDoc]) => {
     const p = pr(n)
+    const matchingApp = approaches.find((a) => a.projectId === p.id)
+    const source = matchingApp ? 'Approach' : 'Direct'
+    const approachId = matchingApp ? matchingApp.id : null
     const rec = {
       id: uuidv4(), projectId: p.id, customer: p.customer, projectName: p.projectName, salesPic: p.salesPic, businessLine: p.businessLine,
+      approachId, source, sourceDisplay: source === 'Approach' ? `Approach (${approachId})` : 'Direct Penawaran',
       quotationNumber: no, quotationDate: D(d), validUntil: D(d + 30), revenue: rev, hpp, margin: rev - hpp, marginPct: Math.round(((rev - hpp) / rev) * 10000) / 100, status, unit,
       notes: '', createdAt: new Date(Date.now() + d * 86400000).toISOString(), updatedAt: now, createdBy: p.salesPic,
     }
@@ -1296,21 +1501,21 @@ async function seedDatabase(db, reset = false) {
 
   // Schedules
   const S = [
-    [1, 0, 'DLV-001', -40, -39, 'Stockpile Banjarmasin', 'Pelabuhan Cigading', 1000, 'MT', 'PT Sumber Batubara', 'Tongkang TB Sinar 01', 'Delivered'],
-    [1, 0, 'DLV-002', -25, -24, 'Stockpile Banjarmasin', 'Pelabuhan Cigading', 1200, 'MT', 'PT Sumber Batubara', 'Tongkang TB Sinar 02', 'Delivered'],
-    [1, 0, 'DLV-003', -2, null, 'Stockpile Banjarmasin', 'Pelabuhan Cigading', 800, 'MT', 'PT Sumber Batubara', 'Tongkang TB Sinar 03', 'In Transit'],
-    [2, 0, 'TRIP-BATCH-1', -75, -60, 'Gudang Cakung Jakarta', 'DC Surabaya', 60, 'trip', 'PT Armada Jaya', 'Fuso 20 unit', 'Delivered'],
-    [2, 0, 'TRIP-BATCH-2', -55, -40, 'Gudang Cakung Jakarta', 'DC Surabaya', 60, 'trip', 'PT Armada Jaya', 'Fuso 20 unit', 'Delivered'],
-    [3, 0, 'DLV-CPO-01', 4, null, 'PKS Riau', 'Refinery Dumai', 1000, 'MT', 'PT Mitra Sawit', 'Truk Tangki 30 unit', 'Scheduled'],
-    [7, 0, 'NKL-01', -60, -58, 'Site Konawe', 'Smelter Morowali', 1500, 'MT', 'PT Mitra Tambang', 'Tongkang', 'Delivered'],
-    [7, 1, 'NKL-02', -5, null, 'Site Konawe', 'Smelter Morowali', 1500, 'MT', 'PT Mitra Tambang', 'Tongkang', 'Delayed'],
-    [9, 0, 'NPK-01', -38, -37, 'Gudang Gresik', 'Gudang Customer Lampung', 500, 'MT', 'PT Pupuk Makmur', 'Truk Tronton 25 unit', 'Delivered'],
-    [9, 1, 'NPK-02', -30, -29, 'Gudang Gresik', 'Gudang Customer Lampung', 300, 'MT', 'PT Pupuk Makmur', 'Truk Tronton 15 unit', 'Delivered'],
+    [1, 0, 'DLV-001', -40, -39, 'Stockpile Banjarmasin', 'Pelabuhan Cigading', 1000, 1000, 'MT', 'PT Sumber Batubara', 'Tongkang TB Sinar 01', 'Delivered'],
+    [1, 0, 'DLV-002', -25, -24, 'Stockpile Banjarmasin', 'Pelabuhan Cigading', 1200, 1200, 'MT', 'PT Sumber Batubara', 'Tongkang TB Sinar 02', 'Delivered'],
+    [1, 0, 'DLV-003', -2, null, 'Stockpile Banjarmasin', 'Pelabuhan Cigading', 800, null, 'MT', 'PT Sumber Batubara', 'Tongkang TB Sinar 03', 'In Transit'],
+    [2, 0, 'TRIP-BATCH-1', -75, -60, 'Gudang Cakung Jakarta', 'DC Surabaya', 60, 60, 'trip', 'PT Armada Jaya', 'Fuso 20 unit', 'Delivered'],
+    [2, 0, 'TRIP-BATCH-2', -55, -40, 'Gudang Cakung Jakarta', 'DC Surabaya', 60, 60, 'trip', 'PT Armada Jaya', 'Fuso 20 unit', 'Delivered'],
+    [3, 0, 'DLV-CPO-01', 4, null, 'PKS Riau', 'Refinery Dumai', 1000, null, 'MT', 'PT Mitra Sawit', 'Truk Tangki 30 unit', 'Scheduled'],
+    [7, 0, 'NKL-01', -60, -58, 'Site Konawe', 'Smelter Morowali', 1500, 1500, 'MT', 'PT Mitra Tambang', 'Tongkang', 'Delivered'],
+    [7, 1, 'NKL-02', -5, null, 'Site Konawe', 'Smelter Morowali', 1500, null, 'MT', 'PT Mitra Tambang', 'Tongkang', 'Delayed'],
+    [9, 0, 'NPK-01', -38, -37, 'Gudang Gresik', 'Gudang Customer Lampung', 500, 500, 'MT', 'PT Pupuk Makmur', 'Truk Tronton 25 unit', 'Delivered'],
+    [9, 1, 'NPK-02', -30, -29, 'Gudang Gresik', 'Gudang Customer Lampung', 300, 300, 'MT', 'PT Pupuk Makmur', 'Truk Tronton 15 unit', 'Delivered'],
   ]
-  const schedules = S.map(([n, poIdx, no, d, ad, origin, dest, qty, unit, vendor, armada, status]) => {
+  const schedules = S.map(([n, poIdx, no, d, ad, origin, dest, plannedQty, actualDeliveredQty, unit, vendor, armada, status]) => {
     const p = pr(n)
     const po = poOf(n, poIdx)
-    const rec = { id: uuidv4(), projectId: p.id, poId: po.id, poNumber: po.poNumber, deliveryNumber: no, scheduleDate: D(d), actualDate: ad === null ? '' : D(ad), origin, destination: dest, qty, unit, vendor, armada, driver: '', status, notes: '', createdAt: new Date(Date.now() + (d - 3) * 86400000).toISOString(), updatedAt: now, createdBy: 'Dedi Operasional' }
+    const rec = { id: uuidv4(), projectId: p.id, poId: po.id, poNumber: po.poNumber, deliveryNumber: no, scheduleDate: D(d), actualDate: ad === null ? '' : D(ad), origin, destination: dest, plannedQty, actualDeliveredQty, qty: plannedQty, unit, vendor, armada, driver: '', status, notes: '', createdAt: new Date(Date.now() + (d - 3) * 86400000).toISOString(), updatedAt: now, createdBy: 'Dedi Operasional' }
     if (status === 'Delivered') addDoc('schedules', rec.id, p.id, `SuratJalan-${no}.pdf`, 'Surat Jalan', 'Dedi Operasional', -ad)
     return rec
   })
@@ -1320,7 +1525,7 @@ async function seedDatabase(db, reset = false) {
   // BAST
   const B = [
     [1, 'DLV-001', 'BAST-ABC-001', -38, 1000, 'Verified'],
-    [1, 'DLV-002', 'BAST-ABC-002', -23, 1200, 'Uploaded'],
+    [1, 'DLV-002', 'BAST-ABC-002', -23, 1200, 'Complete'],
     [2, 'TRIP-BATCH-1', 'BAST-SL-001', -58, 60, 'Complete'],
     [2, 'TRIP-BATCH-2', 'BAST-SL-002', -38, 60, 'Complete'],
     [7, 'NKL-01', 'BAST-NKL-001', -56, 1500, 'Verified'],
@@ -1353,18 +1558,40 @@ async function seedDatabase(db, reset = false) {
   })
   await db.collection('invoices_in').insertMany(invIn)
 
-  // Invoice Out (customer)
+  // Invoice Out (customer) based on BAST
   const IO = [
-    [1, 'INV-ACR-2025-041', -35, -5, 850000000, 850000000, 'Paid'],
-    [1, 'INV-ACR-2025-052', -20, 10, 1020000000, 0, 'Sent'],
-    [2, 'INV-ACR-2025-018', -55, -25, 1250000000, 1250000000, 'Paid'],
-    [7, 'INV-ACR-2025-029', -50, -20, 3750000000, 1500000000, 'Overdue'],
-    [9, 'INV-ACR-2025-047', -28, 4, 2000000000, 800000000, 'Partial Paid'],
+    [1, 'BAST-ABC-001', 'INV-ACR-2025-041', -35, -5, 1000, 850000000, 850000000, 'Paid'],
+    [1, 'BAST-ABC-002', 'INV-ACR-2025-052', -20, 10, 1200, 1020000000, 0, 'Sent'],
+    [2, 'BAST-SL-001', 'INV-ACR-2025-018', -55, -25, 60, 1250000000, 1250000000, 'Paid'],
+    [7, 'BAST-NKL-001', 'INV-ACR-2025-029', -50, -20, 1500, 3750000000, 1500000000, 'Overdue'],
+    [9, 'BAST-NPK-001', 'INV-ACR-2025-047', -28, 4, 500, 2000000000, 800000000, 'Partial Paid'],
   ]
-  const invOut = IO.map(([n, no, d, due, amount, paid, status]) => {
+  const invOut = IO.map(([n, bastNo, no, d, due, qty, amount, paid, status]) => {
     const p = pr(n)
     const po = poOf(n)
-    const rec = { id: uuidv4(), projectId: p.id, poId: po?.id || null, poNumber: po?.poNumber || '', customer: p.customer, invoiceNumber: no, invoiceDate: D(d), dueDate: D(due), amount, paidAmount: paid, outstanding: amount - paid, status, notes: '', createdAt: new Date(Date.now() + d * 86400000).toISOString(), updatedAt: now, createdBy: 'Fitri Finance' }
+    const bast = basts.find((b) => b.bastNumber === bastNo)
+    const rec = {
+      id: uuidv4(),
+      projectId: p.id,
+      poId: po?.id || null,
+      poNumber: po?.poNumber || '',
+      bastId: bast?.id || null,
+      bastNumber: bast?.bastNumber || bastNo,
+      quantity: qty,
+      unit: bast?.unit || po?.unit || 'MT',
+      customer: p.customer,
+      invoiceNumber: no,
+      invoiceDate: D(d),
+      dueDate: D(due),
+      amount,
+      paidAmount: paid,
+      outstanding: amount - paid,
+      status,
+      notes: '',
+      createdAt: new Date(Date.now() + d * 86400000).toISOString(),
+      updatedAt: now,
+      createdBy: 'Fitri Finance',
+    }
     addDoc('invoices-out', rec.id, p.id, `${no}.pdf`, 'Invoice', 'Fitri Finance', -d)
     return rec
   })

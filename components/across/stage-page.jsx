@@ -86,7 +86,16 @@ export function CellValue({ col, row }) {
   }
 }
 
-function detailValue(key, v, row) {
+function detailValue(key, v, row = {}) {
+  if (key === 'sourceDisplay') {
+    if (row?.source === 'Approach' || row?.approachId) {
+      return `Approach (${row.approachId || '-'})`
+    }
+    return 'Direct Penawaran'
+  }
+  if (key === 'approachId') {
+    return row?.approachId || '-'
+  }
   if (v === undefined || v === null || v === '') return '-'
   if (CURRENCY_FIELDS.has(key)) return formatIDR(v)
   if (DATE_FIELDS.has(key)) return formatDate(v)
@@ -195,11 +204,16 @@ function SmartSelect({ value, onChange, options = [], placeholder, allowCustom, 
 
 export function RecordForm({ config, initial = {}, meta, onSaved, onCancel, lockProject = false }) {
   const isEdit = !!initial?.id
+  const [quotationSource, setQuotationSource] = useState(() => initial?.source || (initial?.approachId ? 'Approach' : 'Direct'))
   const [values, setValues] = useState(() => {
     const base = {}
     config.sections.forEach((s) => s.fields.forEach((f) => { if (f.type !== 'computed') base[f.name] = initial?.[f.name] ?? '' }))
     if (!isEdit && config.defaultStatus && !base.status) base.status = config.defaultStatus
     if (initial?.projectId) base.projectId = initial.projectId
+    if (config.key === 'quotations') {
+      base.source = initial?.source || (initial?.approachId ? 'Approach' : 'Direct')
+      base.approachId = initial?.approachId || ''
+    }
     return base
   })
   const [pending, setPending] = useState([])
@@ -219,15 +233,43 @@ export function RecordForm({ config, initial = {}, meta, onSaved, onCancel, lock
     return []
   }
 
+  const isQuotation = config.key === 'quotations'
+  const { data: appData } = useSWR(isQuotation ? '/api/approaches?limit=200' : null, fetcher)
+  const approaches = appData?.items || []
+
   const hasSchedule = config.sections.some((s) => s.fields.some((f) => f.type === 'schedule'))
-  const { data: schedData } = useSWR(hasSchedule && values.projectId ? `/api/schedules?projectId=${values.projectId}&limit=200` : null, fetcher)
+  const { data: schedData } = useSWR(hasSchedule ? (values.projectId ? `/api/schedules?projectId=${values.projectId}&limit=200` : '/api/schedules?limit=200') : null, fetcher)
   const schedules = schedData?.items || []
+
+  const hasBast = config.sections.some((s) => s.fields.some((f) => f.type === 'bast'))
+  const { data: bastData } = useSWR(hasBast ? (values.projectId ? `/api/basts?projectId=${values.projectId}&limit=200` : '/api/basts?limit=200') : null, fetcher)
+  const basts = bastData?.items || []
 
   const hasQuotation = config.sections.some((s) => s.fields.some((f) => f.type === 'quotation'))
   const { data: quotData } = useSWR(hasQuotation ? (values.projectId ? `/api/quotations?projectId=${values.projectId}&limit=200` : '/api/quotations?limit=200') : null, fetcher)
   const quotations = quotData?.items || []
 
   const set = (name, v) => setValues((prev) => ({ ...prev, [name]: v }))
+
+  const onApproachChange = (apId) => {
+    const ap = approaches.find((x) => x.id === apId)
+    if (ap) {
+      setValues((prev) => ({
+        ...prev,
+        approachId: apId,
+        source: 'Approach',
+        sourceDisplay: `Approach (${apId})`,
+        customer: ap.companyName || prev.customer || '',
+        customerPic: ap.customerPic || prev.customerPic || '',
+        salesPic: ap.salesPic || prev.salesPic || '',
+        businessLine: ap.businessLine || prev.businessLine || '',
+        projectName: ap.opportunity || prev.projectName || '',
+        projectId: ap.projectId || prev.projectId || '',
+      }))
+    } else {
+      setValues((prev) => ({ ...prev, approachId: '', source: 'Direct', sourceDisplay: 'Direct Penawaran' }))
+    }
+  }
 
   const onProjectChange = (pid) => {
     const p = projects.find((x) => x.id === pid)
@@ -241,6 +283,8 @@ export function RecordForm({ config, initial = {}, meta, onSaved, onCancel, lock
         if ('unit' in next && !prev.unit && p.unit) next.unit = p.unit
         if ('poId' in next && prev.projectId !== pid) next.poId = ''
         if ('quotationId' in next && prev.projectId !== pid) next.quotationId = ''
+        if ('bastId' in next && prev.projectId !== pid) next.bastId = ''
+        if ('deliveryRef' in next && prev.projectId !== pid) next.deliveryRef = ''
       }
       return next
     })
@@ -270,12 +314,45 @@ export function RecordForm({ config, initial = {}, meta, onSaved, onCancel, lock
       poNumber: po?.poNumber || prev.poNumber || '',
       unit: prev.unit || po?.unit || '',
       customer: prev.customer || po?.customer || '',
+      projectId: po?.projectId || prev.projectId || '',
+      deliveryRef: prev.poId !== poId ? '' : prev.deliveryRef,
+      bastId: prev.poId !== poId ? '' : prev.bastId,
     }))
   }
 
   const onScheduleChange = (sid) => {
     const s = schedules.find((x) => x.id === sid)
-    setValues((prev) => ({ ...prev, deliveryRef: sid, poId: s?.poId || prev.poId, deliveryNumber: s?.deliveryNumber || '', qty: prev.qty || s?.qty || '', unit: prev.unit || s?.unit || '' }))
+    if (s) {
+      const delivered = s.actualDeliveredQty !== null && s.actualDeliveredQty !== undefined ? Number(s.actualDeliveredQty) : (s.status === 'Delivered' ? Number(s.qty) : 0)
+      const remaining = s.remainingUnbastedQty !== undefined ? s.remainingUnbastedQty : delivered
+      setValues((prev) => ({
+        ...prev,
+        deliveryRef: sid,
+        poId: s.poId || prev.poId,
+        deliveryNumber: s.deliveryNumber || '',
+        qty: remaining > 0 ? remaining : prev.qty || '',
+        unit: s.unit || prev.unit || '',
+        projectId: s.projectId || prev.projectId || '',
+      }))
+    }
+  }
+
+  const onBastChange = (bid) => {
+    const b = basts.find((x) => x.id === bid)
+    if (b) {
+      const remaining = b.remainingInvoiceableQty !== undefined ? b.remainingInvoiceableQty : Number(b.qty)
+      const matchingPo = pos.find((p) => p.id === b.poId)
+      setValues((prev) => ({
+        ...prev,
+        bastId: bid,
+        bastNumber: b.bastNumber || prev.bastNumber || '',
+        poId: b.poId || prev.poId,
+        quantity: remaining > 0 ? remaining : prev.quantity || '',
+        unit: b.unit || prev.unit || '',
+        customer: prev.customer || matchingPo?.customer || b.customer || '',
+        projectId: b.projectId || prev.projectId || '',
+      }))
+    }
   }
 
   const submit = async (e) => {
@@ -297,11 +374,74 @@ export function RecordForm({ config, initial = {}, meta, onSaved, onCancel, lock
       }
     }
 
+    // Global quantity validation: All entered quantity fields must be > 0
+    if (config.key === 'pos') {
+      if (Number(values.quantity) <= 0) {
+        toast.error('Qty harus lebih besar dari 0.')
+        return
+      }
+    }
+    if (config.key === 'schedules') {
+      const planned = values.plannedQty !== undefined && values.plannedQty !== '' ? values.plannedQty : values.qty
+      if (Number(planned) <= 0) {
+        toast.error('Qty harus lebih besar dari 0.')
+        return
+      }
+      if (values.actualDeliveredQty !== undefined && values.actualDeliveredQty !== null && values.actualDeliveredQty !== '') {
+        if (Number(values.actualDeliveredQty) <= 0) {
+          toast.error('Qty harus lebih besar dari 0.')
+          return
+        }
+      }
+    }
+    if (config.key === 'basts') {
+      const bastQty = Number(values.qty)
+      if (bastQty <= 0) {
+        toast.error('Qty harus lebih besar dari 0.')
+        return
+      }
+      const selSched = schedules.find((s) => s.id === values.deliveryRef)
+      if (selSched) {
+        const delivered = selSched.actualDeliveredQty !== null && selSched.actualDeliveredQty !== undefined ? Number(selSched.actualDeliveredQty) : (selSched.status === 'Delivered' ? Number(selSched.qty) : 0)
+        const remaining = selSched.remainingUnbastedQty !== undefined ? selSched.remainingUnbastedQty : delivered
+        if (bastQty > remaining) {
+          toast.error(`Qty BAST melebihi sisa quantity pengiriman yang belum dibuatkan BAST. Sisa: ${remaining} ${selSched.unit || ''}`.trim())
+          return
+        }
+      }
+    }
+    if (config.key === 'invoices-out') {
+      const invQty = Number(values.quantity)
+      if (invQty <= 0) {
+        toast.error('Qty harus lebih besar dari 0.')
+        return
+      }
+      const selBast = basts.find((b) => b.id === values.bastId)
+      if (selBast) {
+        const remaining = selBast.remainingInvoiceableQty !== undefined ? selBast.remainingInvoiceableQty : Number(selBast.qty)
+        if (invQty > remaining) {
+          toast.error(`Qty invoice melebihi sisa quantity BAST yang belum ditagihkan. Sisa: ${remaining} ${selBast.unit || ''}`.trim())
+          return
+        }
+      }
+    }
+    if (config.key === 'stocks') {
+      if (Number(values.currentStock) <= 0) {
+        toast.error('Qty harus lebih besar dari 0.')
+        return
+      }
+    }
+
     setSaving(true)
     try {
       const payload = { ...values }
       if (payload.poId) payload.poNumber = pos.find((x) => x.id === payload.poId)?.poNumber || payload.poNumber
       if (payload.quotationId) payload.quotationNumber = quotations.find((x) => x.id === payload.quotationId)?.quotationNumber || payload.quotationNumber
+      if (payload.bastId) payload.bastNumber = basts.find((x) => x.id === payload.bastId)?.bastNumber || payload.bastNumber
+      if (config.key === 'quotations') {
+        payload.source = quotationSource
+        if (quotationSource === 'Direct') payload.approachId = null
+      }
       const saved = isEdit ? await api(`/api/${config.key}/${initial.id}`, { method: 'PUT', body: payload }) : await api(`/api/${config.key}`, { method: 'POST', body: payload })
       if (pending.length) {
         for (let i = 0; i < pending.length; i++) {
@@ -399,16 +539,55 @@ export function RecordForm({ config, initial = {}, meta, onSaved, onCancel, lock
           </Select>
         )
       }
-      case 'schedule':
+      case 'schedule': {
+        const eligibleSchedules = schedules.filter((s) => {
+          if (values.poId && s.poId !== values.poId) return false
+          if (!values.poId && values.projectId && s.projectId !== values.projectId) return false
+          const delivered = s.actualDeliveredQty !== null && s.actualDeliveredQty !== undefined ? Number(s.actualDeliveredQty) : (s.status === 'Delivered' ? Number(s.qty) : 0)
+          return delivered > 0 && ['Partial Delivered', 'Delivered', 'Partial'].includes(s.status)
+        })
         return (
           <Select value={v || NONE} onValueChange={(x) => onScheduleChange(x === NONE ? '' : x)}>
-            <SelectTrigger id={f.name}><SelectValue placeholder={values.projectId ? 'Pilih schedule' : 'Pilih project dulu'} /></SelectTrigger>
-            <SelectContent>
+            <SelectTrigger id={f.name}><SelectValue placeholder={values.poId ? (eligibleSchedules.length ? 'Pilih schedule dengan realisasi pengiriman' : 'Tidak ada schedule ber-realisasi pengiriman') : 'Pilih PO Masuk dulu'} /></SelectTrigger>
+            <SelectContent className="max-h-72">
               <SelectItem value={NONE}><span className="text-muted-foreground">-</span></SelectItem>
-              {schedules.map((s) => <SelectItem key={s.id} value={s.id}>{s.deliveryNumber} · {formatNumber(s.qty)} {s.unit} · {s.status}</SelectItem>)}
+              {eligibleSchedules.map((s) => {
+                const delivered = s.actualDeliveredQty !== null && s.actualDeliveredQty !== undefined ? Number(s.actualDeliveredQty) : Number(s.qty)
+                const remaining = s.remainingUnbastedQty !== undefined ? s.remainingUnbastedQty : delivered
+                return (
+                  <SelectItem key={s.id} value={s.id}>
+                    <span className="font-medium">{s.deliveryNumber}</span> · Realisasi: {formatNumber(delivered)} {s.unit} (Sisa: {formatNumber(remaining)}) · {s.status}
+                  </SelectItem>
+                )
+              })}
             </SelectContent>
           </Select>
         )
+      }
+      case 'bast': {
+        const eligibleBasts = basts.filter((b) => {
+          if (values.poId && b.poId !== values.poId) return false
+          if (!values.poId && values.projectId && b.projectId !== values.projectId) return false
+          const remaining = b.remainingInvoiceableQty !== undefined ? b.remainingInvoiceableQty : Number(b.qty)
+          return Number(b.qty) > 0 && remaining > 0 && ['Partial', 'Complete', 'Verified'].includes(b.status)
+        })
+        return (
+          <Select value={v || NONE} onValueChange={(x) => onBastChange(x === NONE ? '' : x)}>
+            <SelectTrigger id={f.name}><SelectValue placeholder={values.poId ? (eligibleBasts.length ? 'Pilih BAST (Hanya BAST verified / complete)' : 'Tidak ada BAST yang dapat ditagih') : 'Pilih PO Masuk dulu'} /></SelectTrigger>
+            <SelectContent className="max-h-72">
+              <SelectItem value={NONE}><span className="text-muted-foreground">-</span></SelectItem>
+              {eligibleBasts.map((b) => {
+                const remaining = b.remainingInvoiceableQty !== undefined ? b.remainingInvoiceableQty : Number(b.qty)
+                return (
+                  <SelectItem key={b.id} value={b.id}>
+                    <span className="font-medium">{b.bastNumber}</span> · Sisa Tagih: {formatNumber(remaining)} {b.unit || ''} ({b.status})
+                  </SelectItem>
+                )
+              })}
+            </SelectContent>
+          </Select>
+        )
+      }
       default:
         return <Input {...common} value={v || ''} onChange={(e) => set(f.name, e.target.value)} />
     }
@@ -416,6 +595,71 @@ export function RecordForm({ config, initial = {}, meta, onSaved, onCancel, lock
 
   return (
     <form id="record-form" onSubmit={submit} className="space-y-6">
+      {/* Choice for Penawaran Creation: Option A (Dari Approach) vs Option B (Buat Langsung) */}
+      {isQuotation && !isEdit && (
+        <div className="rounded-xl border bg-muted/40 p-3.5 space-y-3">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Sumber Penawaran</span>
+            <span className="text-[11px] text-muted-foreground">Pilih cara pembuatan</span>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setQuotationSource('Approach')
+                set('source', 'Approach')
+              }}
+              className={cn(
+                'h-9 rounded-lg text-xs font-medium border transition-all',
+                quotationSource === 'Approach'
+                  ? 'bg-primary text-white border-primary shadow-sm'
+                  : 'bg-card text-muted-foreground hover:bg-muted'
+              )}
+            >
+              1. Dari Approach
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setQuotationSource('Direct')
+                set('source', 'Direct')
+                set('approachId', null)
+              }}
+              className={cn(
+                'h-9 rounded-lg text-xs font-medium border transition-all',
+                quotationSource === 'Direct'
+                  ? 'bg-primary text-white border-primary shadow-sm'
+                  : 'bg-card text-muted-foreground hover:bg-muted'
+              )}
+            >
+              2. Buat Langsung
+            </button>
+          </div>
+          {quotationSource === 'Approach' && (
+            <div className="space-y-1 pt-1">
+              <Label htmlFor="approachSelector" className="text-xs">Pilih Approach Reference <span className="text-red-500">*</span></Label>
+              <Select value={values.approachId || NONE} onValueChange={(v) => onApproachChange(v === NONE ? '' : v)}>
+                <SelectTrigger id="approachSelector" className="bg-card">
+                  <SelectValue placeholder="Pilih lead approach yang akan diajukan penawaran" />
+                </SelectTrigger>
+                <SelectContent className="max-h-72">
+                  <SelectItem value={NONE}><span className="text-muted-foreground">-</span></SelectItem>
+                  {approaches.filter((a) => a.status !== 'Lost').map((a) => (
+                    <SelectItem key={a.id} value={a.id}>
+                      <span className="font-medium">{a.companyName}</span> · {a.opportunity} ({a.salesPic || '-'})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-[11px] text-muted-foreground">Data Customer, PIC, Sales PIC, Business Line, & Nama Project akan terisi otomatis.</p>
+            </div>
+          )}
+          {quotationSource === 'Direct' && (
+            <p className="text-[11px] text-muted-foreground">Penawaran langsung tanpa Approach. Isi data customer dan project secara manual pada form di bawah.</p>
+          )}
+        </div>
+      )}
+
       {config.sections.map((s, i) => (
         <section key={s.title} className="space-y-3">
           <div>
